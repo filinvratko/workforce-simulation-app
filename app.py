@@ -154,13 +154,7 @@ def clean_column_name(col: Any) -> str:
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    rename_map = {}
-
-    for col in df.columns:
-        clean = clean_column_name(col)
-        rename_map[col] = clean
-
-    return df.rename(columns=rename_map)
+    return df.rename(columns={col: clean_column_name(col) for col in df.columns})
 
 
 def is_yyyymm_column(col: Any) -> bool:
@@ -172,11 +166,8 @@ def validate_required_columns(
     required: List[str],
     sheet_name: str,
 ) -> None:
-    normalized_existing = {str(col).strip().lower(): col for col in df.columns}
-    missing = [
-        col for col in required
-        if col.strip().lower() not in normalized_existing
-    ]
+    existing = {str(col).strip().lower(): col for col in df.columns}
+    missing = [col for col in required if col.strip().lower() not in existing]
 
     if missing:
         raise ValueError(
@@ -263,6 +254,39 @@ def load_calculation_rules(uploaded_file) -> pd.DataFrame:
     validate_required_columns(df, CALC_RULES_REQUIRED_COLUMNS, CALC_RULES_SHEET)
 
     return df
+
+
+# ============================================================
+# Reupload / reset baseline
+# ============================================================
+
+def replace_baseline_with_uploaded_data(uploaded_file) -> None:
+    new_df = load_data_sample(uploaded_file)
+
+    st.session_state.data_sample_df = new_df
+    st.session_state.data_sample_source = uploaded_file.name
+    st.session_state.simulation_events = []
+    st.session_state.chat_messages = [
+        {
+            "role": "assistant",
+            "content": (
+                "New Data Sample uploaded. Baseline was replaced and "
+                "simulation was reset."
+            ),
+        }
+    ]
+
+
+def reset_to_mock_baseline() -> None:
+    st.session_state.data_sample_df = generate_mock_source_data()
+    st.session_state.data_sample_source = "Mock data"
+    st.session_state.simulation_events = []
+    st.session_state.chat_messages = [
+        {
+            "role": "assistant",
+            "content": "Baseline reset to mock data. Simulation was cleared.",
+        }
+    ]
 
 
 # ============================================================
@@ -398,9 +422,7 @@ Return valid JSON only.
 Rules:
 1. Never change Baseline.
 2. Use Baseline as starting point for Simulation.
-3. Baseline is calculated from Calculation_Method rules per GL Account.
-4. Baseline driver values come from uploaded Drivers file.
-5. Create changes only for Simulation version.
+3. Create changes only for Simulation version.
 
 JSON format:
 {
@@ -624,7 +646,7 @@ def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
 
     summary = [
         f"Total FTE impact: {fte_impact:+,.2f}",
-        f"Total USD labor cost impact: ${cost_impact:+,.0f}",
+        f"Total labor cost impact: ${cost_impact:+,.0f}",
         f"Baseline preserved: Yes",
         f"Simulation changes applied: {len(events)}",
     ]
@@ -716,7 +738,6 @@ def apply_css():
             color: #F9FAFB;
             height: 24px;
             line-height: 24px;
-            margin-top: 0px;
         }
 
         div[data-testid="stMetricValue"] {
@@ -764,7 +785,7 @@ def render_excel_help():
     with st.expander("Expected Excel structures"):
         st.markdown(
             """
-            **1. Excel file: `data_sample_anonymized`**
+            **Data Sample file**
 
             Required sheet: **FTE & Costs**
 
@@ -777,7 +798,7 @@ def render_excel_help():
             - Employee
             - Account
 
-            Supported extra row column:
+            Supported extra column:
             - Version
 
             Monthly values must be in columns using **YYYYMM** format:
@@ -789,6 +810,8 @@ def render_excel_help():
             - FTE = rows where Account contains `FTE`, `Headcount`, or `HC`
             - Cost = all non-FTE rows
             - Baseline = rows where Version equals `Baseline`
+
+            Reuploading Data Sample replaces the baseline and clears simulation.
             """
         )
 
@@ -857,23 +880,26 @@ def main():
         st.subheader("GPT Simulation")
 
         data_file = st.file_uploader(
-            "1. Upload data_sample_anonymized",
+            "Upload / Reupload Data Sample",
             type=["xlsx"],
-            key="data_sample_uploader",
+            key="data_sample_reupload",
+            help="Reuploading replaces the current baseline and clears simulation.",
         )
 
         if data_file:
             try:
-                st.session_state.data_sample_df = load_data_sample(data_file)
-                st.session_state.data_sample_source = data_file.name
-                st.session_state.simulation_events = []
-                st.success("Data sample loaded.")
+                replace_baseline_with_uploaded_data(data_file)
+                st.success("Baseline replaced with uploaded Data Sample.")
                 st.rerun()
             except Exception as exc:
                 st.warning(str(exc))
 
+        if st.button("Reset baseline to mock data", use_container_width=True):
+            reset_to_mock_baseline()
+            st.rerun()
+
         drivers_file = st.file_uploader(
-            "2. Upload Drivers",
+            "Upload Drivers",
             type=["xlsx"],
             key="drivers_uploader",
         )
@@ -888,7 +914,7 @@ def main():
                 st.warning(str(exc))
 
         calc_file = st.file_uploader(
-            "3. Upload Calculation_method",
+            "Upload Calculation_method",
             type=["xlsx"],
             key="calculation_method_uploader",
         )
@@ -904,7 +930,7 @@ def main():
 
         render_excel_help()
 
-        st.caption(f"Data: {st.session_state.data_sample_source}")
+        st.caption(f"Data Sample: {st.session_state.data_sample_source}")
         st.caption(f"Drivers: {st.session_state.drivers_source}")
         st.caption(f"Rules: {st.session_state.rules_source}")
 
@@ -936,7 +962,7 @@ def main():
 
             st.rerun()
 
-        if st.button("Reset simulation", use_container_width=True):
+        if st.button("Reset simulation only", use_container_width=True):
             st.session_state.simulation_events = []
             st.session_state.chat_messages = [
                 {
