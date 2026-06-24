@@ -1,3 +1,4 @@
+# app.py
 import os
 import json
 import re
@@ -39,12 +40,8 @@ CALC_RULES_REQUIRED_COLUMNS = [
 ]
 
 
-# ============================================================
-# Mock data
-# ============================================================
-
 def generate_mock_source_data() -> pd.DataFrame:
-    months = pd.date_range("2026-01-01", periods=12, freq="MS")
+    months = pd.date_range("2026-01-01", periods=24, freq="MS")
     accounts = ["FTE", "Salary", "Benefits", "Payroll Tax"]
     employees = ["E001", "E002", "E003", "E004", "E005"]
 
@@ -81,8 +78,7 @@ def generate_mock_source_data() -> pd.DataFrame:
 
 
 def generate_mock_drivers() -> pd.DataFrame:
-    months = pd.date_range("2026-01-01", periods=12, freq="MS")
-
+    months = pd.date_range("2026-01-01", periods=24, freq="MS")
     data = {
         "Driver": [
             "Salary Increase",
@@ -126,10 +122,6 @@ def generate_mock_rules() -> pd.DataFrame:
     )
 
 
-# ============================================================
-# Excel helpers
-# ============================================================
-
 def read_excel_sheet(uploaded_file, sheet_name: str) -> pd.DataFrame:
     try:
         import openpyxl  # noqa: F401
@@ -159,37 +151,47 @@ def validate_required_columns(
         )
 
 
+def clean_column_name(col: Any) -> str:
+    text = str(col).strip()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return text
+
+
 def is_yyyymm_column(column_name: Any) -> bool:
-    text = str(column_name).strip()
+    text = clean_column_name(column_name)
     return bool(re.fullmatch(r"\d{6}", text))
-
-
-def validate_yyyymm_columns(df: pd.DataFrame, excluded_columns: List[str], sheet: str) -> List[str]:
-    date_columns = [col for col in df.columns if col not in excluded_columns and is_yyyymm_column(col)]
-
-    if not date_columns:
-        raise ValueError(
-            f"Sheet '{sheet}' must contain monthly date columns in YYYYMM format, e.g. 202601."
-        )
-
-    return date_columns
 
 
 def normalize_yyyymm_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {}
 
     for col in df.columns:
-        text = str(col).strip()
-
+        text = clean_column_name(col)
         if re.fullmatch(r"\d{6}", text):
             rename_map[col] = text
 
     return df.rename(columns=rename_map)
 
 
-# ============================================================
-# File loaders
-# ============================================================
+def validate_yyyymm_columns(
+    df: pd.DataFrame,
+    excluded_columns: List[str],
+    sheet: str,
+) -> List[str]:
+    date_columns = [
+        col
+        for col in df.columns
+        if col not in excluded_columns and is_yyyymm_column(col)
+    ]
+
+    if not date_columns:
+        raise ValueError(
+            f"Sheet '{sheet}' must contain monthly date columns in YYYYMM format, e.g. 202601."
+        )
+
+    return sorted(date_columns, key=lambda x: pd.to_datetime(str(x), format="%Y%m"))
+
 
 def load_data_sample(uploaded_file) -> pd.DataFrame:
     df = read_excel_sheet(uploaded_file, DATA_SAMPLE_SHEET)
@@ -218,11 +220,7 @@ def load_drivers(uploaded_file) -> pd.DataFrame:
 
     validate_required_columns(df, ["Driver"], DRIVERS_SHEET)
 
-    month_columns = validate_yyyymm_columns(
-        df,
-        ["Driver"],
-        DRIVERS_SHEET,
-    )
+    month_columns = validate_yyyymm_columns(df, ["Driver"], DRIVERS_SHEET)
 
     for col in month_columns:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -242,15 +240,14 @@ def load_calculation_rules(uploaded_file) -> pd.DataFrame:
     return df
 
 
-# ============================================================
-# Data transformation
-# ============================================================
-
 def get_month_columns(df: pd.DataFrame, excluded_columns: List[str]) -> List[str]:
-    return [
-        col for col in df.columns
+    month_columns = [
+        col
+        for col in df.columns
         if col not in excluded_columns and is_yyyymm_column(col)
     ]
+
+    return sorted(month_columns, key=lambda x: pd.to_datetime(str(x), format="%Y%m"))
 
 
 def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
@@ -301,10 +298,6 @@ def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
 
     return monthly
 
-
-# ============================================================
-# OpenAI / fallback parser
-# ============================================================
 
 def get_openai_api_key():
     try:
@@ -441,10 +434,6 @@ def extract_month_yyyymm(text: str) -> str:
     return "202601"
 
 
-# ============================================================
-# Simulation
-# ============================================================
-
 def apply_simulation_logic(
     baseline_monthly: pd.DataFrame,
     events: List[Dict[str, Any]],
@@ -469,7 +458,7 @@ def apply_simulation_logic(
             )
 
             if pd.isna(effective_month):
-                effective_month = pd.to_datetime("202601", format="%Y%m")
+                effective_month = df["Month"].min()
 
             mask = df["Month"] >= effective_month
 
@@ -492,11 +481,14 @@ def apply_simulation_logic(
     return df
 
 
-# ============================================================
-# Charts / summary
-# ============================================================
-
-def render_chart(title, df, baseline_metric, simulation_metric, y_title):
+def render_chart(
+    title: str,
+    df: pd.DataFrame,
+    baseline_metric: str,
+    simulation_metric: str,
+    y_title: str,
+    height: int,
+) -> go.Figure:
     fig = go.Figure()
 
     fig.add_trace(
@@ -520,17 +512,23 @@ def render_chart(title, df, baseline_metric, simulation_metric, y_title):
     fig.update_layout(
         title=title,
         barmode="group",
-        height=360,
+        height=height,
         plot_bgcolor="#111827",
         paper_bgcolor="#111827",
         font=dict(color="#F9FAFB"),
-        margin=dict(l=30, r=30, t=60, b=30),
-        legend=dict(orientation="h", y=1.1),
+        margin=dict(l=30, r=30, t=55, b=85),
+        legend=dict(orientation="h", y=1.14),
         yaxis_title=y_title,
     )
 
     fig.update_yaxes(gridcolor="#374151")
-    fig.update_xaxes(showgrid=False)
+    fig.update_xaxes(
+        showgrid=False,
+        tickangle=-45,
+        tickmode="array",
+        tickvals=df["MonthLabel"].tolist(),
+        ticktext=df["MonthLabel"].tolist(),
+    )
 
     return fig
 
@@ -550,10 +548,6 @@ def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
 
     return [item[:100] for item in summary[:6]]
 
-
-# ============================================================
-# UI
-# ============================================================
 
 def apply_css():
     st.markdown(
@@ -620,6 +614,11 @@ def apply_css():
             padding: 16px;
             border-radius: 10px;
             border: 1px solid #1F2937;
+            min-height: 118px;
+            height: 118px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
         }
 
         div[data-testid="stMetricLabel"],
@@ -686,8 +685,6 @@ def render_excel_help():
             - 202602
             - 202603
 
-            ---
-
             **2. Excel file: `Drivers`**
 
             Required sheet: **SAC Driver**
@@ -695,14 +692,6 @@ def render_excel_help():
             Required columns:
             - Driver
             - Monthly date columns in **YYYYMM** format
-
-            Example:
-            - Driver
-            - 202601
-            - 202602
-            - 202603
-
-            ---
 
             **3. Excel file: `Calculation_method`**
 
@@ -880,6 +869,7 @@ def main():
                 "FTE",
                 "SimulationFTE",
                 "FTE",
+                height=240,
             ),
             use_container_width=True,
         )
@@ -891,6 +881,7 @@ def main():
                 "TotalCostOfLabor",
                 "SimulationCost",
                 "Total Cost of Labor",
+                height=480,
             ),
             use_container_width=True,
         )
@@ -907,9 +898,7 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
         with st.expander("Preview loaded data"):
-            tab1, tab2, tab3 = st.tabs(
-                ["FTE & Costs", "SAC Driver", "NDC Rules"]
-            )
+            tab1, tab2, tab3 = st.tabs(["FTE & Costs", "SAC Driver", "NDC Rules"])
 
             with tab1:
                 st.dataframe(st.session_state.data_sample_df.head(50))
@@ -923,3 +912,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
