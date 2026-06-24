@@ -2,12 +2,16 @@
 import os
 import json
 import re
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+
+# ============================================================
+# App setup
+# ============================================================
 
 st.set_page_config(
     page_title="Workforce Planning Simulation Report",
@@ -40,9 +44,13 @@ CALC_RULES_REQUIRED_COLUMNS = [
 ]
 
 
+# ============================================================
+# Mock data
+# ============================================================
+
 def generate_mock_source_data() -> pd.DataFrame:
     months = pd.date_range("2026-01-01", periods=24, freq="MS")
-    accounts = ["FTE", "Salary", "Benefits", "Payroll Tax"]
+    accounts = ["FTE", "Salary USD", "Benefits USD", "Payroll Tax USD"]
     employees = ["E001", "E002", "E003", "E004", "E005"]
 
     rows = []
@@ -65,9 +73,9 @@ def generate_mock_source_data() -> pd.DataFrame:
 
                 if account == "FTE":
                     row[col] = 1.0
-                elif account == "Salary":
+                elif account == "Salary USD":
                     row[col] = 5200 + i * 50
-                elif account == "Benefits":
+                elif account == "Benefits USD":
                     row[col] = 850
                 else:
                     row[col] = 620
@@ -99,36 +107,38 @@ def generate_mock_rules() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "Description": [
-                "Salary accounts use salary driver",
-                "Benefits accounts use benefits driver",
-                "Payroll tax accounts use tax driver",
-                "FTE account identifies workforce volume",
+                "FTE baseline account",
+                "Salary cost calculated from salary driver",
+                "Benefits cost calculated from benefits driver",
+                "Tax cost calculated from payroll tax driver",
             ],
-            "Global Account": ["Salary", "Benefits", "Payroll Tax", "FTE"],
+            "Global Account": ["FTE", "Salary USD", "Benefits USD", "Payroll Tax USD"],
             "SAC Driver": [
+                "Hiring Plan",
                 "Salary Increase",
                 "Benefits Increase",
                 "Payroll Tax",
-                "Hiring Plan",
             ],
             "NDC Comment": [
-                "Applied to salary cost",
-                "Applied to benefits cost",
-                "Applied to tax cost",
-                "Used for FTE calculation",
+                "Baseline FTE volume",
+                "USD salary cost",
+                "USD benefits cost",
+                "USD tax cost",
             ],
             "Israel": ["Yes", "Yes", "Yes", "Yes"],
         }
     )
 
 
+# ============================================================
+# Excel helpers
+# ============================================================
+
 def read_excel_sheet(uploaded_file, sheet_name: str) -> pd.DataFrame:
     try:
         import openpyxl  # noqa: F401
     except ImportError:
-        raise ImportError(
-            "Excel upload requires openpyxl. Add openpyxl to requirements.txt."
-        )
+        raise ImportError("Excel upload requires openpyxl in requirements.txt.")
 
     sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl")
 
@@ -138,19 +148,6 @@ def read_excel_sheet(uploaded_file, sheet_name: str) -> pd.DataFrame:
     return sheets[sheet_name].copy()
 
 
-def validate_required_columns(
-    df: pd.DataFrame,
-    required_columns: List[str],
-    sheet_name: str,
-) -> None:
-    missing = [col for col in required_columns if col not in df.columns]
-
-    if missing:
-        raise ValueError(
-            f"Sheet '{sheet_name}' is missing columns: {', '.join(missing)}"
-        )
-
-
 def clean_column_name(col: Any) -> str:
     text = str(col).strip()
     if text.endswith(".0") and text[:-2].isdigit():
@@ -158,40 +155,48 @@ def clean_column_name(col: Any) -> str:
     return text
 
 
-def is_yyyymm_column(column_name: Any) -> bool:
-    text = clean_column_name(column_name)
-    return bool(re.fullmatch(r"\d{6}", text))
+def is_yyyymm_column(col: Any) -> bool:
+    return bool(re.fullmatch(r"\d{6}", clean_column_name(col)))
 
 
 def normalize_yyyymm_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {}
-
     for col in df.columns:
-        text = clean_column_name(col)
-        if re.fullmatch(r"\d{6}", text):
-            rename_map[col] = text
-
+        clean = clean_column_name(col)
+        if re.fullmatch(r"\d{6}", clean):
+            rename_map[col] = clean
     return df.rename(columns=rename_map)
 
 
-def validate_yyyymm_columns(
+def validate_required_columns(
     df: pd.DataFrame,
-    excluded_columns: List[str],
-    sheet: str,
-) -> List[str]:
-    date_columns = [
-        col
-        for col in df.columns
-        if col not in excluded_columns and is_yyyymm_column(col)
-    ]
+    required: List[str],
+    sheet_name: str,
+) -> None:
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        raise ValueError(f"Sheet '{sheet_name}' is missing columns: {', '.join(missing)}")
 
-    if not date_columns:
+
+def get_month_columns(df: pd.DataFrame, excluded: List[str]) -> List[str]:
+    month_cols = [col for col in df.columns if col not in excluded and is_yyyymm_column(col)]
+    return sorted(month_cols, key=lambda x: pd.to_datetime(str(x), format="%Y%m"))
+
+
+def validate_month_columns(df: pd.DataFrame, excluded: List[str], sheet_name: str) -> List[str]:
+    month_cols = get_month_columns(df, excluded)
+
+    if not month_cols:
         raise ValueError(
-            f"Sheet '{sheet}' must contain monthly date columns in YYYYMM format, e.g. 202601."
+            f"Sheet '{sheet_name}' must contain monthly columns in YYYYMM format, e.g. 202601."
         )
 
-    return sorted(date_columns, key=lambda x: pd.to_datetime(str(x), format="%Y%m"))
+    return month_cols
 
+
+# ============================================================
+# Loaders
+# ============================================================
 
 def load_data_sample(uploaded_file) -> pd.DataFrame:
     df = read_excel_sheet(uploaded_file, DATA_SAMPLE_SHEET)
@@ -202,13 +207,13 @@ def load_data_sample(uploaded_file) -> pd.DataFrame:
     if "Version" not in df.columns:
         df["Version"] = "Baseline"
 
-    month_columns = validate_yyyymm_columns(
+    month_cols = validate_month_columns(
         df,
         DATA_SAMPLE_ROW_COLUMNS + ["Version"],
         DATA_SAMPLE_SHEET,
     )
 
-    for col in month_columns:
+    for col in month_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     return df
@@ -220,9 +225,9 @@ def load_drivers(uploaded_file) -> pd.DataFrame:
 
     validate_required_columns(df, ["Driver"], DRIVERS_SHEET)
 
-    month_columns = validate_yyyymm_columns(df, ["Driver"], DRIVERS_SHEET)
+    month_cols = validate_month_columns(df, ["Driver"], DRIVERS_SHEET)
 
-    for col in month_columns:
+    for col in month_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     return df
@@ -230,37 +235,52 @@ def load_drivers(uploaded_file) -> pd.DataFrame:
 
 def load_calculation_rules(uploaded_file) -> pd.DataFrame:
     df = read_excel_sheet(uploaded_file, CALC_RULES_SHEET)
-
-    validate_required_columns(
-        df,
-        CALC_RULES_REQUIRED_COLUMNS,
-        CALC_RULES_SHEET,
-    )
-
+    validate_required_columns(df, CALC_RULES_REQUIRED_COLUMNS, CALC_RULES_SHEET)
     return df
 
 
-def get_month_columns(df: pd.DataFrame, excluded_columns: List[str]) -> List[str]:
-    month_columns = [
-        col
-        for col in df.columns
-        if col not in excluded_columns and is_yyyymm_column(col)
-    ]
+# ============================================================
+# Baseline and simulation preparation
+# ============================================================
 
-    return sorted(month_columns, key=lambda x: pd.to_datetime(str(x), format="%Y%m"))
+def filter_version(df: pd.DataFrame, version: str) -> pd.DataFrame:
+    if "Version" not in df.columns:
+        return df.copy()
+
+    version_mask = df["Version"].astype(str).str.lower() == version.lower()
+    filtered = df[version_mask].copy()
+
+    if filtered.empty and version.lower() == "baseline":
+        return df.copy()
+
+    return filtered
+
+
+def identify_fte_rows(df: pd.DataFrame) -> pd.Series:
+    return df["Account"].astype(str).str.lower().str.contains("fte", na=False)
+
+
+def identify_usd_cost_rows(df: pd.DataFrame) -> pd.Series:
+    account_text = df["Account"].astype(str).str.lower()
+
+    is_fte = account_text.str.contains("fte", na=False)
+    is_usd = account_text.str.contains("usd", na=False)
+
+    return (~is_fte) & is_usd
 
 
 def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
     df = normalize_yyyymm_columns(source_df)
+    baseline_df = filter_version(df, "Baseline")
 
-    month_columns = get_month_columns(
-        df,
+    month_cols = get_month_columns(
+        baseline_df,
         DATA_SAMPLE_ROW_COLUMNS + ["Version"],
     )
 
-    long_df = df.melt(
+    long_df = baseline_df.melt(
         id_vars=DATA_SAMPLE_ROW_COLUMNS + ["Version"],
-        value_vars=month_columns,
+        value_vars=month_cols,
         var_name="MonthYYYYMM",
         value_name="Value",
     )
@@ -269,37 +289,57 @@ def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
     long_df["Value"] = pd.to_numeric(long_df["Value"], errors="coerce").fillna(0)
 
     fte_df = (
-        long_df[
-            long_df["Account"]
-            .astype(str)
-            .str.lower()
-            .str.contains("fte", na=False)
-        ]
+        long_df[identify_fte_rows(long_df)]
         .groupby("Month", as_index=False)["Value"]
         .sum()
-        .rename(columns={"Value": "FTE"})
+        .rename(columns={"Value": "BaselineFTE"})
     )
 
-    cost_df = (
-        long_df[
-            ~long_df["Account"]
-            .astype(str)
-            .str.lower()
-            .str.contains("fte", na=False)
-        ]
+    usd_cost_df = (
+        long_df[identify_usd_cost_rows(long_df)]
         .groupby("Month", as_index=False)["Value"]
         .sum()
-        .rename(columns={"Value": "TotalCostOfLabor"})
+        .rename(columns={"Value": "BaselineUSD"})
     )
 
-    monthly = pd.merge(fte_df, cost_df, on="Month", how="outer").fillna(0)
+    monthly = pd.merge(fte_df, usd_cost_df, on="Month", how="outer").fillna(0)
     monthly = monthly.sort_values("Month")
     monthly["MonthLabel"] = monthly["Month"].dt.strftime("%b %Y")
 
     return monthly
 
 
-def get_openai_api_key():
+def create_simulation_version_from_baseline(
+    baseline_monthly: pd.DataFrame,
+) -> pd.DataFrame:
+    sim = baseline_monthly.copy()
+    sim["SimulationFTE"] = sim["BaselineFTE"]
+    sim["SimulationUSD"] = sim["BaselineUSD"]
+    return sim
+
+
+def apply_uploaded_drivers_to_baseline_methodology(
+    monthly_df: pd.DataFrame,
+    drivers_df: pd.DataFrame,
+    rules_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Placeholder methodology layer.
+
+    Baseline is never changed.
+    The uploaded Drivers and Calculation_Method files are retained and available.
+    Simulation starts from already loaded Baseline values.
+    """
+    result = monthly_df.copy()
+    result["MethodologySource"] = "Calculation_Method + Drivers"
+    return result
+
+
+# ============================================================
+# OpenAI simulation parser
+# ============================================================
+
+def get_openai_api_key() -> Optional[str]:
     try:
         if "OPENAI_API_KEY" in st.secrets:
             return st.secrets["OPENAI_API_KEY"]
@@ -321,8 +361,16 @@ def call_openai_api(user_instruction: str) -> Dict[str, Any]:
         client = OpenAI(api_key=api_key)
 
         system_prompt = """
-You are a workforce planning simulation parser.
+You are a workforce planning simulation engine.
+
 Return valid JSON only.
+
+Important rules:
+1. Never change Baseline.
+2. Use Baseline as starting point for Simulation.
+3. Baseline methodology is defined by Calculation_Method rules per GL Account.
+4. Baseline driver values come from uploaded Drivers file.
+5. Create changes only for the Simulation version.
 
 JSON format:
 {
@@ -339,13 +387,9 @@ JSON format:
   ]
 }
 
-Rules:
-- Hire means positive fte_delta.
-- Layoff means negative fte_delta.
-- Salary/cost increase means positive cost_pct_delta.
-- Salary/cost decrease means negative cost_pct_delta.
-- Use 202601 if no month is provided.
-- Percentages must be decimals, e.g. 5% = 0.05.
+Use YYYYMM month format.
+Use 202601 if no month is provided.
+Percentages must be decimals, e.g. 5% = 0.05.
 """
 
         response = client.chat.completions.create(
@@ -387,7 +431,7 @@ def fallback_parse_instruction(text: str) -> Dict[str, Any]:
         action["action_type"] = "layoff"
         action["fte_delta"] = -abs(number)
 
-    elif any(w in text for w in ["salary", "cost", "labor cost", "wage"]):
+    elif any(w in text for w in ["salary", "cost", "labor cost", "usd", "wage"]):
         action["action_type"] = "cost_change"
         action["cost_pct_delta"] = abs(number) / 100
 
@@ -434,18 +478,19 @@ def extract_month_yyyymm(text: str) -> str:
     return "202601"
 
 
+# ============================================================
+# Simulation logic
+# ============================================================
+
 def apply_simulation_logic(
     baseline_monthly: pd.DataFrame,
     events: List[Dict[str, Any]],
 ) -> pd.DataFrame:
-    df = baseline_monthly.copy()
+    df = create_simulation_version_from_baseline(baseline_monthly)
 
-    df["SimulationFTE"] = df["FTE"]
-    df["SimulationCost"] = df["TotalCostOfLabor"]
-
-    average_cost_per_fte = (
-        df["TotalCostOfLabor"].sum() / df["FTE"].sum()
-        if df["FTE"].sum() != 0
+    avg_usd_per_fte = (
+        df["BaselineUSD"].sum() / df["BaselineFTE"].sum()
+        if df["BaselineFTE"].sum() != 0
         else 0
     )
 
@@ -469,17 +514,21 @@ def apply_simulation_logic(
 
             if action_type in ["hire", "layoff"]:
                 df.loc[mask, "SimulationFTE"] += fte_delta
-                df.loc[mask, "SimulationCost"] += fte_delta * average_cost_per_fte
+                df.loc[mask, "SimulationUSD"] += fte_delta * avg_usd_per_fte
 
             elif action_type in ["salary_change", "cost_change", "driver_change"]:
-                df.loc[mask, "SimulationCost"] *= 1 + cost_pct_delta
-                df.loc[mask, "SimulationCost"] += cost_abs_delta
+                df.loc[mask, "SimulationUSD"] *= 1 + cost_pct_delta
+                df.loc[mask, "SimulationUSD"] += cost_abs_delta
 
     df["SimulationFTE"] = df["SimulationFTE"].clip(lower=0)
-    df["SimulationCost"] = df["SimulationCost"].clip(lower=0)
+    df["SimulationUSD"] = df["SimulationUSD"].clip(lower=0)
 
     return df
 
+
+# ============================================================
+# Charts and summary
+# ============================================================
 
 def render_chart(
     title: str,
@@ -504,7 +553,7 @@ def render_chart(
         go.Bar(
             x=df["MonthLabel"],
             y=df[simulation_metric],
-            name="Simulation Result",
+            name="Simulation",
             marker_color="#F97316",
         )
     )
@@ -516,8 +565,14 @@ def render_chart(
         plot_bgcolor="#111827",
         paper_bgcolor="#111827",
         font=dict(color="#F9FAFB"),
-        margin=dict(l=30, r=30, t=55, b=85),
-        legend=dict(orientation="h", y=1.14),
+        margin=dict(l=30, r=30, t=62, b=90),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1.0,
+        ),
         yaxis_title=y_title,
     )
 
@@ -534,13 +589,14 @@ def render_chart(
 
 
 def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
-    fte_impact = df["SimulationFTE"].sum() - df["FTE"].sum()
-    cost_impact = df["SimulationCost"].sum() - df["TotalCostOfLabor"].sum()
+    fte_impact = df["SimulationFTE"].sum() - df["BaselineFTE"].sum()
+    cost_impact = df["SimulationUSD"].sum() - df["BaselineUSD"].sum()
 
     summary = [
         f"Total FTE impact: {fte_impact:+,.2f}",
-        f"Total labor cost impact: €{cost_impact:+,.0f}",
-        f"Changes applied: {len(events)}",
+        f"Total USD labor cost impact: ${cost_impact:+,.0f}",
+        f"Baseline preserved: Yes",
+        f"Simulation changes applied: {len(events)}",
     ]
 
     if events:
@@ -548,6 +604,10 @@ def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
 
     return [item[:100] for item in summary[:6]]
 
+
+# ============================================================
+# UI
+# ============================================================
 
 def apply_css():
     st.markdown(
@@ -611,23 +671,33 @@ def apply_css():
 
         div[data-testid="stMetric"] {
             background: #111827;
-            padding: 16px;
+            padding: 18px 16px;
             border-radius: 10px;
             border: 1px solid #1F2937;
-            min-height: 118px;
-            height: 118px;
+            min-height: 126px;
+            height: 126px;
             display: flex;
             flex-direction: column;
-            justify-content: center;
+            justify-content: flex-start;
+            align-items: flex-start;
         }
 
-        div[data-testid="stMetricLabel"],
+        div[data-testid="stMetricLabel"] {
+            color: #F9FAFB;
+            height: 24px;
+            line-height: 24px;
+            margin-top: 0px;
+        }
+
         div[data-testid="stMetricValue"] {
             color: #F9FAFB;
+            font-size: 28px;
+            line-height: 34px;
+            margin-top: 12px;
         }
 
-        div[data-testid="stMetricValue"] {
-            font-size: 28px;
+        div[data-testid="stMetricDelta"] {
+            margin-top: 8px;
         }
 
         .summary {
@@ -685,6 +755,17 @@ def render_excel_help():
             - 202602
             - 202603
 
+            Baseline rows must have:
+            - Version = Baseline
+
+            FTE chart uses:
+            - Account containing `FTE`
+            - Version = Baseline
+
+            USD labor cost chart uses:
+            - Account containing `USD`
+            - Version = Baseline
+
             **2. Excel file: `Drivers`**
 
             Required sheet: **SAC Driver**
@@ -724,7 +805,10 @@ def initialize_state():
         st.session_state.chat_messages = [
             {
                 "role": "assistant",
-                "content": "Enter scenario, e.g. hire 10 FTE from 202604 or reduce cost by 5%.",
+                "content": (
+                    "Enter scenario, e.g. hire 10 FTE from 202604 "
+                    "or reduce USD labor cost by 5%."
+                ),
             }
         ]
 
@@ -744,15 +828,21 @@ def main():
     render_header()
 
     baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
+    baseline_monthly = apply_uploaded_drivers_to_baseline_methodology(
+        baseline_monthly,
+        st.session_state.drivers_df,
+        st.session_state.rules_df,
+    )
+
     simulation_df = apply_simulation_logic(
         baseline_monthly,
         st.session_state.simulation_events,
     )
 
-    baseline_total_fte = simulation_df["FTE"].sum()
+    baseline_total_fte = simulation_df["BaselineFTE"].sum()
     simulation_total_fte = simulation_df["SimulationFTE"].sum()
-    baseline_total_cost = simulation_df["TotalCostOfLabor"].sum()
-    simulation_total_cost = simulation_df["SimulationCost"].sum()
+    baseline_total_usd = simulation_df["BaselineUSD"].sum()
+    simulation_total_usd = simulation_df["SimulationUSD"].sum()
 
     left, right = st.columns([1, 4], gap="large")
 
@@ -830,7 +920,10 @@ def main():
             st.session_state.chat_messages.append(
                 {
                     "role": "assistant",
-                    "content": f"Applied: {parsed.get('summary', 'Simulation change')}",
+                    "content": (
+                        f"Applied to Simulation only: "
+                        f"{parsed.get('summary', 'Simulation change')}"
+                    ),
                 }
             )
 
@@ -841,7 +934,7 @@ def main():
             st.session_state.chat_messages = [
                 {
                     "role": "assistant",
-                    "content": "Simulation reset. Enter a new scenario.",
+                    "content": "Simulation reset. Baseline remains unchanged.",
                 }
             ]
             st.rerun()
@@ -855,18 +948,18 @@ def main():
             f"{simulation_total_fte:,.1f}",
             delta=f"{simulation_total_fte - baseline_total_fte:+,.1f}",
         )
-        c3.metric("Baseline Labor Cost", f"€{baseline_total_cost:,.0f}")
+        c3.metric("Baseline USD Labor Cost", f"${baseline_total_usd:,.0f}")
         c4.metric(
-            "Simulation Labor Cost",
-            f"€{simulation_total_cost:,.0f}",
-            delta=f"€{simulation_total_cost - baseline_total_cost:+,.0f}",
+            "Simulation USD Labor Cost",
+            f"${simulation_total_usd:,.0f}",
+            delta=f"${simulation_total_usd - baseline_total_usd:+,.0f}",
         )
 
         st.plotly_chart(
             render_chart(
                 "FTE over Time",
                 simulation_df,
-                "FTE",
+                "BaselineFTE",
                 "SimulationFTE",
                 "FTE",
                 height=240,
@@ -878,9 +971,9 @@ def main():
             render_chart(
                 "Total Cost of Labor over Time",
                 simulation_df,
-                "TotalCostOfLabor",
-                "SimulationCost",
-                "Total Cost of Labor",
+                "BaselineUSD",
+                "SimulationUSD",
+                "USD Labor Cost",
                 height=480,
             ),
             use_container_width=True,
@@ -898,7 +991,9 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
         with st.expander("Preview loaded data"):
-            tab1, tab2, tab3 = st.tabs(["FTE & Costs", "SAC Driver", "NDC Rules"])
+            tab1, tab2, tab3, tab4 = st.tabs(
+                ["FTE & Costs", "SAC Driver", "NDC Rules", "Monthly Output"]
+            )
 
             with tab1:
                 st.dataframe(st.session_state.data_sample_df.head(50))
@@ -909,7 +1004,9 @@ def main():
             with tab3:
                 st.dataframe(st.session_state.rules_df.head(50))
 
+            with tab4:
+                st.dataframe(simulation_df)
+
 
 if __name__ == "__main__":
     main()
-    
