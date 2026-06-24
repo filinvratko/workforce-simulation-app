@@ -9,10 +9,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
-# ============================================================
-# App setup
-# ============================================================
-
 st.set_page_config(
     page_title="Workforce Planning Simulation Report",
     layout="wide",
@@ -50,7 +46,7 @@ CALC_RULES_REQUIRED_COLUMNS = [
 
 def generate_mock_source_data() -> pd.DataFrame:
     months = pd.date_range("2026-01-01", periods=24, freq="MS")
-    accounts = ["FTE", "Salary USD", "Benefits USD", "Payroll Tax USD"]
+    accounts = ["FTE", "Salary", "Benefits", "Payroll Tax"]
     employees = ["E001", "E002", "E003", "E004", "E005"]
 
     rows = []
@@ -73,9 +69,9 @@ def generate_mock_source_data() -> pd.DataFrame:
 
                 if account == "FTE":
                     row[col] = 1.0
-                elif account == "Salary USD":
+                elif account == "Salary":
                     row[col] = 5200 + i * 50
-                elif account == "Benefits USD":
+                elif account == "Benefits":
                     row[col] = 850
                 else:
                     row[col] = 620
@@ -112,7 +108,7 @@ def generate_mock_rules() -> pd.DataFrame:
                 "Benefits cost calculated from benefits driver",
                 "Tax cost calculated from payroll tax driver",
             ],
-            "Global Account": ["FTE", "Salary USD", "Benefits USD", "Payroll Tax USD"],
+            "Global Account": ["FTE", "Salary", "Benefits", "Payroll Tax"],
             "SAC Driver": [
                 "Hiring Plan",
                 "Salary Increase",
@@ -121,9 +117,9 @@ def generate_mock_rules() -> pd.DataFrame:
             ],
             "NDC Comment": [
                 "Baseline FTE volume",
-                "USD salary cost",
-                "USD benefits cost",
-                "USD tax cost",
+                "Labor salary cost",
+                "Labor benefits cost",
+                "Labor tax cost",
             ],
             "Israel": ["Yes", "Yes", "Yes", "Yes"],
         }
@@ -150,22 +146,25 @@ def read_excel_sheet(uploaded_file, sheet_name: str) -> pd.DataFrame:
 
 def clean_column_name(col: Any) -> str:
     text = str(col).strip()
+
     if text.endswith(".0") and text[:-2].isdigit():
         text = text[:-2]
+
     return text
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {}
+
+    for col in df.columns:
+        clean = clean_column_name(col)
+        rename_map[col] = clean
+
+    return df.rename(columns=rename_map)
 
 
 def is_yyyymm_column(col: Any) -> bool:
     return bool(re.fullmatch(r"\d{6}", clean_column_name(col)))
-
-
-def normalize_yyyymm_columns(df: pd.DataFrame) -> pd.DataFrame:
-    rename_map = {}
-    for col in df.columns:
-        clean = clean_column_name(col)
-        if re.fullmatch(r"\d{6}", clean):
-            rename_map[col] = clean
-    return df.rename(columns=rename_map)
 
 
 def validate_required_columns(
@@ -173,17 +172,41 @@ def validate_required_columns(
     required: List[str],
     sheet_name: str,
 ) -> None:
-    missing = [col for col in required if col not in df.columns]
+    normalized_existing = {str(col).strip().lower(): col for col in df.columns}
+    missing = [
+        col for col in required
+        if col.strip().lower() not in normalized_existing
+    ]
+
     if missing:
-        raise ValueError(f"Sheet '{sheet_name}' is missing columns: {', '.join(missing)}")
+        raise ValueError(
+            f"Sheet '{sheet_name}' is missing columns: {', '.join(missing)}"
+        )
+
+
+def get_actual_column(df: pd.DataFrame, expected_name: str) -> Optional[str]:
+    for col in df.columns:
+        if str(col).strip().lower() == expected_name.strip().lower():
+            return col
+    return None
 
 
 def get_month_columns(df: pd.DataFrame, excluded: List[str]) -> List[str]:
-    month_cols = [col for col in df.columns if col not in excluded and is_yyyymm_column(col)]
+    excluded_lower = [x.lower() for x in excluded]
+
+    month_cols = [
+        col for col in df.columns
+        if str(col).strip().lower() not in excluded_lower and is_yyyymm_column(col)
+    ]
+
     return sorted(month_cols, key=lambda x: pd.to_datetime(str(x), format="%Y%m"))
 
 
-def validate_month_columns(df: pd.DataFrame, excluded: List[str], sheet_name: str) -> List[str]:
+def validate_month_columns(
+    df: pd.DataFrame,
+    excluded: List[str],
+    sheet_name: str,
+) -> List[str]:
     month_cols = get_month_columns(df, excluded)
 
     if not month_cols:
@@ -200,11 +223,11 @@ def validate_month_columns(df: pd.DataFrame, excluded: List[str], sheet_name: st
 
 def load_data_sample(uploaded_file) -> pd.DataFrame:
     df = read_excel_sheet(uploaded_file, DATA_SAMPLE_SHEET)
-    df = normalize_yyyymm_columns(df)
+    df = normalize_columns(df)
 
     validate_required_columns(df, DATA_SAMPLE_ROW_COLUMNS, DATA_SAMPLE_SHEET)
 
-    if "Version" not in df.columns:
+    if get_actual_column(df, "Version") is None:
         df["Version"] = "Baseline"
 
     month_cols = validate_month_columns(
@@ -221,7 +244,7 @@ def load_data_sample(uploaded_file) -> pd.DataFrame:
 
 def load_drivers(uploaded_file) -> pd.DataFrame:
     df = read_excel_sheet(uploaded_file, DRIVERS_SHEET)
-    df = normalize_yyyymm_columns(df)
+    df = normalize_columns(df)
 
     validate_required_columns(df, ["Driver"], DRIVERS_SHEET)
 
@@ -235,51 +258,77 @@ def load_drivers(uploaded_file) -> pd.DataFrame:
 
 def load_calculation_rules(uploaded_file) -> pd.DataFrame:
     df = read_excel_sheet(uploaded_file, CALC_RULES_SHEET)
+    df = normalize_columns(df)
+
     validate_required_columns(df, CALC_RULES_REQUIRED_COLUMNS, CALC_RULES_SHEET)
+
     return df
 
 
 # ============================================================
-# Baseline and simulation preparation
+# Baseline data logic
 # ============================================================
 
 def filter_version(df: pd.DataFrame, version: str) -> pd.DataFrame:
-    if "Version" not in df.columns:
+    version_col = get_actual_column(df, "Version")
+
+    if version_col is None:
         return df.copy()
 
-    version_mask = df["Version"].astype(str).str.lower() == version.lower()
-    filtered = df[version_mask].copy()
+    filtered = df[
+        df[version_col].astype(str).str.strip().str.lower()
+        == version.strip().lower()
+    ].copy()
 
-    if filtered.empty and version.lower() == "baseline":
+    if filtered.empty:
+        st.warning(
+            f"No rows found for Version = '{version}'. "
+            "Using all rows from uploaded file instead."
+        )
         return df.copy()
 
     return filtered
 
 
 def identify_fte_rows(df: pd.DataFrame) -> pd.Series:
-    return df["Account"].astype(str).str.lower().str.contains("fte", na=False)
+    account_col = get_actual_column(df, "Account")
+
+    if account_col is None:
+        return pd.Series(False, index=df.index)
+
+    account_text = df[account_col].astype(str).str.lower().str.strip()
+
+    return (
+        account_text.str.contains("fte", na=False)
+        | account_text.str.contains("headcount", na=False)
+        | account_text.str.fullmatch("hc", na=False)
+    )
 
 
-def identify_usd_cost_rows(df: pd.DataFrame) -> pd.Series:
-    account_text = df["Account"].astype(str).str.lower()
-
-    is_fte = account_text.str.contains("fte", na=False)
-    is_usd = account_text.str.contains("usd", na=False)
-
-    return (~is_fte) & is_usd
+def identify_cost_rows(df: pd.DataFrame) -> pd.Series:
+    return ~identify_fte_rows(df)
 
 
 def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
-    df = normalize_yyyymm_columns(source_df)
+    df = normalize_columns(source_df)
     baseline_df = filter_version(df, "Baseline")
+
+    version_col = get_actual_column(baseline_df, "Version") or "Version"
+
+    id_columns = DATA_SAMPLE_ROW_COLUMNS.copy()
+    if version_col in baseline_df.columns:
+        id_columns.append(version_col)
 
     month_cols = get_month_columns(
         baseline_df,
         DATA_SAMPLE_ROW_COLUMNS + ["Version"],
     )
 
+    if not month_cols:
+        raise ValueError("No YYYYMM month columns found in uploaded data.")
+
     long_df = baseline_df.melt(
-        id_vars=DATA_SAMPLE_ROW_COLUMNS + ["Version"],
+        id_vars=id_columns,
         value_vars=month_cols,
         var_name="MonthYYYYMM",
         value_name="Value",
@@ -295,44 +344,25 @@ def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={"Value": "BaselineFTE"})
     )
 
-    usd_cost_df = (
-        long_df[identify_usd_cost_rows(long_df)]
+    cost_df = (
+        long_df[identify_cost_rows(long_df)]
         .groupby("Month", as_index=False)["Value"]
         .sum()
         .rename(columns={"Value": "BaselineUSD"})
     )
 
-    monthly = pd.merge(fte_df, usd_cost_df, on="Month", how="outer").fillna(0)
+    monthly = pd.merge(fte_df, cost_df, on="Month", how="outer").fillna(0)
     monthly = monthly.sort_values("Month")
     monthly["MonthLabel"] = monthly["Month"].dt.strftime("%b %Y")
 
     return monthly
 
 
-def create_simulation_version_from_baseline(
-    baseline_monthly: pd.DataFrame,
-) -> pd.DataFrame:
-    sim = baseline_monthly.copy()
-    sim["SimulationFTE"] = sim["BaselineFTE"]
-    sim["SimulationUSD"] = sim["BaselineUSD"]
-    return sim
-
-
-def apply_uploaded_drivers_to_baseline_methodology(
-    monthly_df: pd.DataFrame,
-    drivers_df: pd.DataFrame,
-    rules_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Placeholder methodology layer.
-
-    Baseline is never changed.
-    The uploaded Drivers and Calculation_Method files are retained and available.
-    Simulation starts from already loaded Baseline values.
-    """
-    result = monthly_df.copy()
-    result["MethodologySource"] = "Calculation_Method + Drivers"
-    return result
+def create_simulation_from_baseline(baseline_monthly: pd.DataFrame) -> pd.DataFrame:
+    df = baseline_monthly.copy()
+    df["SimulationFTE"] = df["BaselineFTE"]
+    df["SimulationUSD"] = df["BaselineUSD"]
+    return df
 
 
 # ============================================================
@@ -365,12 +395,12 @@ You are a workforce planning simulation engine.
 
 Return valid JSON only.
 
-Important rules:
+Rules:
 1. Never change Baseline.
 2. Use Baseline as starting point for Simulation.
-3. Baseline methodology is defined by Calculation_Method rules per GL Account.
+3. Baseline is calculated from Calculation_Method rules per GL Account.
 4. Baseline driver values come from uploaded Drivers file.
-5. Create changes only for the Simulation version.
+5. Create changes only for Simulation version.
 
 JSON format:
 {
@@ -486,7 +516,7 @@ def apply_simulation_logic(
     baseline_monthly: pd.DataFrame,
     events: List[Dict[str, Any]],
 ) -> pd.DataFrame:
-    df = create_simulation_version_from_baseline(baseline_monthly)
+    df = create_simulation_from_baseline(baseline_monthly)
 
     avg_usd_per_fte = (
         df["BaselineUSD"].sum() / df["BaselineFTE"].sum()
@@ -755,35 +785,10 @@ def render_excel_help():
             - 202602
             - 202603
 
-            Baseline rows must have:
-            - Version = Baseline
-
-            FTE chart uses:
-            - Account containing `FTE`
-            - Version = Baseline
-
-            USD labor cost chart uses:
-            - Account containing `USD`
-            - Version = Baseline
-
-            **2. Excel file: `Drivers`**
-
-            Required sheet: **SAC Driver**
-
-            Required columns:
-            - Driver
-            - Monthly date columns in **YYYYMM** format
-
-            **3. Excel file: `Calculation_method`**
-
-            Required sheet: **NDC Per country Rules**
-
-            Required columns:
-            - Description
-            - Global Account
-            - SAC Driver
-            - NDC Comment
-            - Israel
+            Chart logic:
+            - FTE = rows where Account contains `FTE`, `Headcount`, or `HC`
+            - Cost = all non-FTE rows
+            - Baseline = rows where Version equals `Baseline`
             """
         )
 
@@ -807,7 +812,7 @@ def initialize_state():
                 "role": "assistant",
                 "content": (
                     "Enter scenario, e.g. hire 10 FTE from 202604 "
-                    "or reduce USD labor cost by 5%."
+                    "or reduce labor cost by 5%."
                 ),
             }
         ]
@@ -822,22 +827,24 @@ def initialize_state():
         st.session_state.rules_source = "Mock rules"
 
 
+# ============================================================
+# Main app
+# ============================================================
+
 def main():
     initialize_state()
     apply_css()
     render_header()
 
-    baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
-    baseline_monthly = apply_uploaded_drivers_to_baseline_methodology(
-        baseline_monthly,
-        st.session_state.drivers_df,
-        st.session_state.rules_df,
-    )
-
-    simulation_df = apply_simulation_logic(
-        baseline_monthly,
-        st.session_state.simulation_events,
-    )
+    try:
+        baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
+        simulation_df = apply_simulation_logic(
+            baseline_monthly,
+            st.session_state.simulation_events,
+        )
+    except Exception as exc:
+        st.error(f"Data preparation error: {exc}")
+        return
 
     baseline_total_fte = simulation_df["BaselineFTE"].sum()
     simulation_total_fte = simulation_df["SimulationFTE"].sum()
@@ -948,9 +955,9 @@ def main():
             f"{simulation_total_fte:,.1f}",
             delta=f"{simulation_total_fte - baseline_total_fte:+,.1f}",
         )
-        c3.metric("Baseline USD Labor Cost", f"${baseline_total_usd:,.0f}")
+        c3.metric("Baseline Labor Cost", f"${baseline_total_usd:,.0f}")
         c4.metric(
-            "Simulation USD Labor Cost",
+            "Simulation Labor Cost",
             f"${simulation_total_usd:,.0f}",
             delta=f"${simulation_total_usd - baseline_total_usd:+,.0f}",
         )
@@ -973,7 +980,7 @@ def main():
                 simulation_df,
                 "BaselineUSD",
                 "SimulationUSD",
-                "USD Labor Cost",
+                "Labor Cost",
                 height=480,
             ),
             use_container_width=True,
@@ -990,22 +997,22 @@ def main():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        with st.expander("Preview loaded data"):
-            tab1, tab2, tab3, tab4 = st.tabs(
-                ["FTE & Costs", "SAC Driver", "NDC Rules", "Monthly Output"]
+        with st.expander("Debug loaded monthly data"):
+            st.dataframe(simulation_df, use_container_width=True)
+
+        with st.expander("Preview loaded source files"):
+            tab1, tab2, tab3 = st.tabs(
+                ["FTE & Costs", "SAC Driver", "NDC Rules"]
             )
 
             with tab1:
-                st.dataframe(st.session_state.data_sample_df.head(50))
+                st.dataframe(st.session_state.data_sample_df.head(100))
 
             with tab2:
-                st.dataframe(st.session_state.drivers_df.head(50))
+                st.dataframe(st.session_state.drivers_df.head(100))
 
             with tab3:
-                st.dataframe(st.session_state.rules_df.head(50))
-
-            with tab4:
-                st.dataframe(simulation_df)
+                st.dataframe(st.session_state.rules_df.head(100))
 
 
 if __name__ == "__main__":
