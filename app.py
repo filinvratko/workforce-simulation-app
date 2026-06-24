@@ -1,658 +1,760 @@
-import json
 import os
+import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 
+# ============================================================
+# App configuration
+# ============================================================
+
 st.set_page_config(
     page_title="Workforce Planning Simulation Report",
-    page_icon="W",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-LOGO_URL = "https://www.cleanpng.com/png-teva-logo-transparent-png-download-2ohbhi/download-png.html"
 
-BASELINE_SHEET = "Baseline"
-DRIVERS_SHEET = "Drivers"
-RULES_SHEET = "Rules"
+# ============================================================
+# Constants
+# ============================================================
 
-BASELINE_COLUMNS = {
-    "month",
-    "fte",
-    "total_cost_of_labor",
-    "role",
-    "location",
-    "average_salary",
-}
-DRIVERS_COLUMNS = {"driver", "value", "description"}
-RULES_COLUMNS = {"rule", "value", "description"}
+REPORT_TITLE = "Workforce Planning Simulation Report"
+COMPANY_LOGO_URL = "https://www.cleanpng.com/png-teva-logo-transparent-png-download-2ohbhi/download-png.html"
 
-SIMULATION_SCHEMA = {
-    "actions": [
+BASELINE_REQUIRED_COLUMNS = [
+    "Month",
+    "Role",
+    "Location",
+    "FTE",
+    "AverageSalary",
+    "CostDriverPct",
+]
+
+DRIVERS_REQUIRED_COLUMNS = [
+    "DriverName",
+    "DriverType",
+    "Value",
+    "EffectiveMonth",
+]
+
+RULES_REQUIRED_COLUMNS = [
+    "RuleName",
+    "RuleType",
+    "Value",
+]
+
+
+# ============================================================
+# Session state initialization
+# ============================================================
+
+def initialize_session_state() -> None:
+    if "baseline_df" not in st.session_state:
+        st.session_state.baseline_df = generate_mock_data()
+
+    if "drivers_df" not in st.session_state:
+        st.session_state.drivers_df = generate_mock_drivers()
+
+    if "rules_df" not in st.session_state:
+        st.session_state.rules_df = generate_mock_rules()
+
+    if "simulation_events" not in st.session_state:
+        st.session_state.simulation_events = []
+
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = [
+            {
+                "role": "assistant",
+                "content": (
+                    "Describe a workforce scenario, for example: "
+                    "'Hire 10 engineers in Prague from Apr 2026' or "
+                    "'Reduce salary cost by 5% from June 2026'."
+                ),
+            }
+        ]
+
+    if "simulation_df" not in st.session_state:
+        st.session_state.simulation_df = apply_simulation_logic(
+            st.session_state.baseline_df,
+            st.session_state.simulation_events,
+        )
+
+    if "data_source" not in st.session_state:
+        st.session_state.data_source = "Mock data"
+
+
+# ============================================================
+# Data generation
+# ============================================================
+
+def generate_mock_data() -> pd.DataFrame:
+    months = pd.date_range("2026-01-01", periods=12, freq="MS")
+
+    rows = []
+    roles = ["Operator", "Engineer", "Manager", "Analyst"]
+    locations = ["Prague", "Brno", "Ostrava"]
+
+    base_values = {
+        "Operator": {"fte": 80, "salary": 3200},
+        "Engineer": {"fte": 45, "salary": 5200},
+        "Manager": {"fte": 18, "salary": 7600},
+        "Analyst": {"fte": 25, "salary": 4300},
+    }
+
+    for month_index, month in enumerate(months):
+        for role in roles:
+            for location in locations:
+                base_fte = base_values[role]["fte"] / len(locations)
+                growth = month_index * 0.15
+                salary = base_values[role]["salary"]
+                cost_driver_pct = 0.18
+
+                rows.append(
+                    {
+                        "Month": month,
+                        "Role": role,
+                        "Location": location,
+                        "FTE": round(base_fte + growth, 2),
+                        "AverageSalary": salary,
+                        "CostDriverPct": cost_driver_pct,
+                    }
+                )
+
+    return pd.DataFrame(rows)
+
+
+def generate_mock_drivers() -> pd.DataFrame:
+    return pd.DataFrame(
         {
-            "type": "hire | layoff | salary_change | role_change | location_change | cost_driver_change",
-            "month": "YYYY-MM",
-            "fte_delta": 0,
-            "cost_delta": 0,
-            "salary_pct_change": 0,
-            "role": "",
-            "location": "",
-            "description": "",
+            "DriverName": ["Payroll tax", "Benefits", "Annual merit increase"],
+            "DriverType": ["Cost", "Cost", "Salary"],
+            "Value": [0.18, 0.07, 0.03],
+            "EffectiveMonth": ["2026-01-01", "2026-01-01", "2026-07-01"],
         }
-    ]
+    )
+
+
+def generate_mock_rules() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "RuleName": ["Monthly labor cost", "FTE rounding"],
+            "RuleType": ["Calculation", "Display"],
+            "Value": [
+                "FTE * AverageSalary * (1 + CostDriverPct)",
+                "Round FTE to 2 decimals",
+            ],
+        }
+    )
+
+
+# ============================================================
+# Excel loading and validation
+# ============================================================
+
+def validate_columns(
+    df: pd.DataFrame,
+    required_columns: List[str],
+    sheet_name: str,
+) -> List[str]:
+    missing = [col for col in required_columns if col not in df.columns]
+
+    if missing:
+        return [f"Sheet '{sheet_name}' is missing columns: {', '.join(missing)}"]
+
+    return []
+
+
+def validate_excel_sheets(
+    sheets: Dict[str, pd.DataFrame],
+) -> Tuple[bool, List[str]]:
+    errors = []
+
+    required_sheets = {
+        "Baseline": BASELINE_REQUIRED_COLUMNS,
+        "Drivers": DRIVERS_REQUIRED_COLUMNS,
+        "Rules": RULES_REQUIRED_COLUMNS,
+    }
+
+    for sheet_name, required_columns in required_sheets.items():
+        if sheet_name not in sheets:
+            errors.append(f"Missing required sheet: {sheet_name}")
+        else:
+            errors.extend(
+                validate_columns(sheets[sheet_name], required_columns, sheet_name)
+            )
+
+    return len(errors) == 0, errors
+
+
+def load_excel_data(uploaded_file) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    sheets = pd.read_excel(uploaded_file, sheet_name=None)
+
+    is_valid, errors = validate_excel_sheets(sheets)
+
+    if not is_valid:
+        raise ValueError("\n".join(errors))
+
+    baseline_df = sheets["Baseline"].copy()
+    drivers_df = sheets["Drivers"].copy()
+    rules_df = sheets["Rules"].copy()
+
+    baseline_df["Month"] = pd.to_datetime(baseline_df["Month"])
+    baseline_df["FTE"] = pd.to_numeric(baseline_df["FTE"], errors="coerce")
+    baseline_df["AverageSalary"] = pd.to_numeric(
+        baseline_df["AverageSalary"],
+        errors="coerce",
+    )
+    baseline_df["CostDriverPct"] = pd.to_numeric(
+        baseline_df["CostDriverPct"],
+        errors="coerce",
+    )
+
+    if baseline_df[["FTE", "AverageSalary", "CostDriverPct"]].isna().any().any():
+        raise ValueError(
+            "Baseline sheet contains invalid numeric values in FTE, "
+            "AverageSalary, or CostDriverPct."
+        )
+
+    return baseline_df, drivers_df, rules_df
+
+
+# ============================================================
+# API connector placeholder
+# ============================================================
+
+def future_data_connector() -> Dict[str, Any]:
+    return {
+        "status": "placeholder",
+        "description": (
+            "Future connector for HRIS, payroll, ERP, data lake, "
+            "or workforce planning system integration."
+        ),
+        "supported_sources": [
+            "Workday",
+            "SAP SuccessFactors",
+            "Oracle HCM",
+            "Azure SQL",
+            "Snowflake",
+            "SharePoint",
+        ],
+    }
+
+
+# ============================================================
+# OpenAI integration
+# ============================================================
+
+def get_openai_api_key() -> str | None:
+    try:
+        if "OPENAI_API_KEY" in st.secrets:
+            return st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        pass
+
+    return os.getenv("OPENAI_API_KEY")
+
+
+def call_openai_api(user_instruction: str) -> Dict[str, Any]:
+    api_key = get_openai_api_key()
+
+    if not api_key:
+        return fallback_parse_simulation_instruction(user_instruction)
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+
+        system_prompt = """
+You are a workforce planning simulation parser.
+
+Convert the user instruction into valid JSON only.
+
+Allowed JSON structure:
+{
+  "summary": "short plain English summary",
+  "actions": [
+    {
+      "action_type": "hire | layoff | salary_change | role_change | location_change | cost_driver_change",
+      "fte_delta": number,
+      "salary_pct_delta": number,
+      "cost_driver_pct_delta": number,
+      "role": string or null,
+      "location": string or null,
+      "target_role": string or null,
+      "target_location": string or null,
+      "effective_month": "YYYY-MM-01"
+    }
+  ]
 }
 
+Rules:
+- Hiring means positive fte_delta.
+- Layoff means negative fte_delta.
+- Salary reduction means negative salary_pct_delta.
+- Salary increase means positive salary_pct_delta.
+- Cost driver reduction means negative cost_driver_pct_delta.
+- Cost driver increase means positive cost_driver_pct_delta.
+- If month is missing, use 2026-01-01.
+- If role or location is missing, use null.
+- Return JSON only.
+"""
 
-def inject_css() -> None:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_instruction},
+            ],
+        )
+
+        content = response.choices[0].message.content.strip()
+        return json.loads(content)
+
+    except Exception:
+        return fallback_parse_simulation_instruction(user_instruction)
+
+
+def fallback_parse_simulation_instruction(user_instruction: str) -> Dict[str, Any]:
+    text = user_instruction.lower()
+
+    month = extract_month(text)
+    number = extract_first_number(text)
+
+    action = {
+        "action_type": "salary_change",
+        "fte_delta": 0,
+        "salary_pct_delta": 0,
+        "cost_driver_pct_delta": 0,
+        "role": extract_role(text),
+        "location": extract_location(text),
+        "target_role": None,
+        "target_location": None,
+        "effective_month": month,
+    }
+
+    if any(word in text for word in ["hire", "add", "recruit"]):
+        action["action_type"] = "hire"
+        action["fte_delta"] = number
+
+    elif any(word in text for word in ["layoff", "remove", "reduce fte", "cut fte"]):
+        action["action_type"] = "layoff"
+        action["fte_delta"] = -abs(number)
+
+    elif "salary" in text or "pay" in text or "wage" in text:
+        action["action_type"] = "salary_change"
+        action["salary_pct_delta"] = number / 100
+
+        if any(word in text for word in ["reduce", "decrease", "cut", "lower"]):
+            action["salary_pct_delta"] = -abs(action["salary_pct_delta"])
+
+    elif "cost driver" in text or "benefit" in text or "tax" in text:
+        action["action_type"] = "cost_driver_change"
+        action["cost_driver_pct_delta"] = number / 100
+
+        if any(word in text for word in ["reduce", "decrease", "cut", "lower"]):
+            action["cost_driver_pct_delta"] = -abs(action["cost_driver_pct_delta"])
+
+    elif "role" in text:
+        action["action_type"] = "role_change"
+        action["target_role"] = "New Role"
+
+    elif "location" in text or "move" in text:
+        action["action_type"] = "location_change"
+        action["target_location"] = "New Location"
+
+    return {
+        "summary": user_instruction[:100],
+        "actions": [action],
+    }
+
+
+def extract_first_number(text: str) -> float:
+    match = re.search(r"[-+]?\d*\.?\d+", text)
+    return float(match.group()) if match else 0.0
+
+
+def extract_month(text: str) -> str:
+    month_map = {
+        "jan": "2026-01-01",
+        "january": "2026-01-01",
+        "feb": "2026-02-01",
+        "february": "2026-02-01",
+        "mar": "2026-03-01",
+        "march": "2026-03-01",
+        "apr": "2026-04-01",
+        "april": "2026-04-01",
+        "may": "2026-05-01",
+        "jun": "2026-06-01",
+        "june": "2026-06-01",
+        "jul": "2026-07-01",
+        "july": "2026-07-01",
+        "aug": "2026-08-01",
+        "august": "2026-08-01",
+        "sep": "2026-09-01",
+        "september": "2026-09-01",
+        "oct": "2026-10-01",
+        "october": "2026-10-01",
+        "nov": "2026-11-01",
+        "november": "2026-11-01",
+        "dec": "2026-12-01",
+        "december": "2026-12-01",
+    }
+
+    for key, value in month_map.items():
+        if key in text:
+            return value
+
+    return "2026-01-01"
+
+
+def extract_role(text: str) -> str | None:
+    roles = ["operator", "engineer", "manager", "analyst"]
+
+    for role in roles:
+        if role in text:
+            return role.title()
+
+    return None
+
+
+def extract_location(text: str) -> str | None:
+    locations = ["prague", "brno", "ostrava"]
+
+    for location in locations:
+        if location in text:
+            return location.title()
+
+    return None
+
+
+# ============================================================
+# Simulation logic
+# ============================================================
+
+def calculate_labor_cost(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    result["TotalCostOfLabor"] = (
+        result["FTE"]
+        * result["AverageSalary"]
+        * (1 + result["CostDriverPct"])
+    )
+    return result
+
+
+def apply_simulation_logic(
+    baseline_df: pd.DataFrame,
+    simulation_events: List[Dict[str, Any]],
+) -> pd.DataFrame:
+    df = baseline_df.copy()
+    df["Month"] = pd.to_datetime(df["Month"])
+
+    for event in simulation_events:
+        for action in event.get("actions", []):
+            effective_month = pd.to_datetime(
+                action.get("effective_month", "2026-01-01")
+            )
+
+            mask = df["Month"] >= effective_month
+
+            role = action.get("role")
+            location = action.get("location")
+
+            if role:
+                mask &= df["Role"].str.lower() == str(role).lower()
+
+            if location:
+                mask &= df["Location"].str.lower() == str(location).lower()
+
+            action_type = action.get("action_type")
+
+            if action_type in ["hire", "layoff"]:
+                fte_delta = float(action.get("fte_delta", 0))
+                month_count = max(df.loc[mask, "Month"].nunique(), 1)
+                row_count = max(mask.sum(), 1)
+                distributed_delta = fte_delta / row_count
+                df.loc[mask, "FTE"] = df.loc[mask, "FTE"] + distributed_delta
+
+            elif action_type == "salary_change":
+                salary_pct_delta = float(action.get("salary_pct_delta", 0))
+                df.loc[mask, "AverageSalary"] = (
+                    df.loc[mask, "AverageSalary"] * (1 + salary_pct_delta)
+                )
+
+            elif action_type == "cost_driver_change":
+                cost_driver_delta = float(action.get("cost_driver_pct_delta", 0))
+                df.loc[mask, "CostDriverPct"] = (
+                    df.loc[mask, "CostDriverPct"] + cost_driver_delta
+                )
+
+            elif action_type == "role_change":
+                target_role = action.get("target_role")
+                if target_role:
+                    df.loc[mask, "Role"] = target_role
+
+            elif action_type == "location_change":
+                target_location = action.get("target_location")
+                if target_location:
+                    df.loc[mask, "Location"] = target_location
+
+    df["FTE"] = df["FTE"].clip(lower=0)
+    df["CostDriverPct"] = df["CostDriverPct"].clip(lower=0)
+
+    return calculate_labor_cost(df)
+
+
+def aggregate_monthly(df: pd.DataFrame) -> pd.DataFrame:
+    calc_df = calculate_labor_cost(df)
+
+    monthly = (
+        calc_df.groupby("Month", as_index=False)
+        .agg(
+            FTE=("FTE", "sum"),
+            TotalCostOfLabor=("TotalCostOfLabor", "sum"),
+        )
+        .sort_values("Month")
+    )
+
+    monthly["MonthLabel"] = monthly["Month"].dt.strftime("%b %Y")
+    return monthly
+
+
+# ============================================================
+# Chart rendering
+# ============================================================
+
+def render_grouped_bar_chart(
+    title: str,
+    baseline_monthly: pd.DataFrame,
+    simulation_monthly: pd.DataFrame,
+    metric: str,
+    y_axis_title: str,
+) -> go.Figure:
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Bar(
+            x=baseline_monthly["MonthLabel"],
+            y=baseline_monthly[metric],
+            name="Baseline",
+            marker_color="#2563EB",
+        )
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=simulation_monthly["MonthLabel"],
+            y=simulation_monthly[metric],
+            name="Simulation Result",
+            marker_color="#F97316",
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        barmode="group",
+        height=350,
+        margin=dict(l=20, r=20, t=60, b=30),
+        legend=dict(orientation="h", y=1.12),
+        yaxis_title=y_axis_title,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+    )
+
+    fig.update_yaxes(gridcolor="#E5E7EB")
+    fig.update_xaxes(showgrid=False)
+
+    return fig
+
+
+# ============================================================
+# Summary rendering
+# ============================================================
+
+def build_impact_summary(
+    baseline_df: pd.DataFrame,
+    simulation_df: pd.DataFrame,
+    simulation_events: List[Dict[str, Any]],
+) -> List[str]:
+    baseline_monthly = aggregate_monthly(baseline_df)
+    simulation_monthly = aggregate_monthly(simulation_df)
+
+    fte_impact = simulation_monthly["FTE"].sum() - baseline_monthly["FTE"].sum()
+    cost_impact = (
+        simulation_monthly["TotalCostOfLabor"].sum()
+        - baseline_monthly["TotalCostOfLabor"].sum()
+    )
+
+    latest_fte = simulation_monthly["FTE"].iloc[-1] - baseline_monthly["FTE"].iloc[-1]
+    latest_cost = (
+        simulation_monthly["TotalCostOfLabor"].iloc[-1]
+        - baseline_monthly["TotalCostOfLabor"].iloc[-1]
+    )
+
+    summary = [
+        f"Total FTE impact: {fte_impact:+,.2f}",
+        f"Total labor cost impact: €{cost_impact:+,.0f}",
+        f"Latest month FTE impact: {latest_fte:+,.2f}",
+        f"Latest month cost impact: €{latest_cost:+,.0f}",
+        f"Simulation changes applied: {len(simulation_events)}",
+    ]
+
+    if simulation_events:
+        last_summary = simulation_events[-1].get("summary", "Latest change applied")
+        summary.append(f"Latest change: {last_summary}")
+
+    return [item[:100] for item in summary[:6]]
+
+
+def render_impact_summary(
+    baseline_df: pd.DataFrame,
+    simulation_df: pd.DataFrame,
+    simulation_events: List[Dict[str, Any]],
+) -> None:
+    st.markdown('<div class="summary-panel">', unsafe_allow_html=True)
+    st.subheader("Simulation Impact Summary")
+
+    summary = build_impact_summary(
+        baseline_df,
+        simulation_df,
+        simulation_events,
+    )
+
+    for item in summary:
+        st.markdown(f"- {item}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ============================================================
+# UI styling
+# ============================================================
+
+def apply_custom_css() -> None:
     st.markdown(
         """
         <style>
-            .block-container {
-                padding-top: 0.75rem;
-                padding-left: 1.25rem;
-                padding-right: 1.25rem;
-                max-width: 100%;
-            }
-            .app-header {
-                width: 100%;
-                display: grid;
-                grid-template-columns: 220px 1fr 240px;
-                align-items: center;
-                padding: 14px 20px;
-                border-bottom: 1px solid #d9dee8;
-                background: #ffffff;
-                margin-bottom: 16px;
-            }
-            .header-logo {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                font-weight: 700;
-                color: #14345b;
-                font-size: 15px;
-            }
-            .header-logo img {
-                height: 42px;
-                max-width: 145px;
-                object-fit: contain;
-            }
-            .header-title {
-                text-align: center;
-                font-size: 25px;
-                font-weight: 750;
-                color: #14233b;
-            }
-            .header-user {
-                display: flex;
-                justify-content: flex-end;
-                align-items: center;
-                gap: 12px;
-                color: #27364f;
-                font-size: 14px;
-                font-weight: 650;
-            }
-            .avatar-placeholder {
-                width: 38px;
-                height: 38px;
-                border-radius: 50%;
-                border: 1px solid #b9c2d1;
-                background: #f5f7fb;
-            }
-            .left-panel {
-                min-height: calc(100vh - 120px);
-                padding: 16px;
-                border: 1px solid #dbe1ea;
-                background: #f8fafd;
-                border-radius: 8px;
-            }
-            .panel-title {
-                font-size: 17px;
-                font-weight: 750;
-                color: #172033;
-                margin-bottom: 6px;
-            }
-            .panel-subtitle {
-                font-size: 12px;
-                color: #5d6b82;
-                line-height: 1.35;
-                margin-bottom: 14px;
-            }
-            .metric-row {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: 12px;
-                margin-bottom: 14px;
-            }
-            .metric-card {
-                border: 1px solid #dbe1ea;
-                background: #ffffff;
-                border-radius: 8px;
-                padding: 12px 14px;
-            }
-            .metric-label {
-                font-size: 12px;
-                color: #63708a;
-                margin-bottom: 4px;
-            }
-            .metric-value {
-                font-size: 20px;
-                font-weight: 760;
-                color: #14233b;
-            }
-            .summary-box {
-                border: 1px solid #dbe1ea;
-                background: #ffffff;
-                border-radius: 8px;
-                padding: 16px 18px;
-                margin-top: 14px;
-            }
-            .summary-title {
-                font-size: 16px;
-                font-weight: 750;
-                color: #172033;
-                margin-bottom: 8px;
-            }
-            .api-placeholder {
-                border: 1px dashed #aeb8c8;
-                background: #fbfcfe;
-                border-radius: 8px;
-                padding: 12px;
-                color: #56647a;
-                font-size: 12px;
-                line-height: 1.35;
-                margin-top: 12px;
-            }
-            .stChatMessage {
-                background: #ffffff;
-                border: 1px solid #e2e6ee;
-                border-radius: 8px;
-                padding: 4px;
-            }
-            div[data-testid="stFileUploader"] {
-                background: #ffffff;
-                border: 1px solid #e2e6ee;
-                border-radius: 8px;
-                padding: 8px;
-            }
-            @media (max-width: 900px) {
-                .app-header {
-                    grid-template-columns: 1fr;
-                    gap: 10px;
-                    text-align: center;
-                }
-                .header-user,
-                .header-logo {
-                    justify-content: center;
-                }
-                .metric-row {
-                    grid-template-columns: 1fr;
-                }
-            }
+        .block-container {
+            padding-top: 1rem;
+            padding-bottom: 2rem;
+            max-width: 100%;
+        }
+
+        .main-header {
+            width: 100%;
+            background: linear-gradient(90deg, #0F172A 0%, #1E293B 100%);
+            color: white;
+            padding: 16px 24px;
+            border-radius: 14px;
+            margin-bottom: 18px;
+            display: grid;
+            grid-template-columns: 1fr 2fr 1fr;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo-box {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 18px;
+            font-weight: 800;
+        }
+
+        .logo-placeholder {
+            width: 54px;
+            height: 36px;
+            border-radius: 8px;
+            background: white;
+            color: #0F766E;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 900;
+            font-size: 14px;
+        }
+
+        .report-title {
+            text-align: center;
+            font-size: 26px;
+            font-weight: 800;
+        }
+
+        .user-box {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 12px;
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .avatar-placeholder {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            border: 2px dashed #CBD5E1;
+            background: #334155;
+        }
+
+        .dashboard-panel {
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-radius: 16px;
+            padding: 18px;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+        }
+
+        .chat-panel {
+            background: #F8FAFC;
+            border: 1px solid #E2E8F0;
+            border-radius: 16px;
+            padding: 16px;
+            min-height: 760px;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+        }
+
+        .summary-panel {
+            background: #FFF7ED;
+            border-left: 6px solid #F97316;
+            padding: 18px 24px;
+            border-radius: 14px;
+            margin-top: 18px;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+        }
+
+        .small-muted {
+            font-size: 13px;
+            color: #64748B;
+            line-height: 1.45;
+        }
+
+        div[data-testid="stMetricValue"] {
+            font-size: 24px;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def initialize_session_state() -> None:
-    if "baseline_df" not in st.session_state:
-        st.session_state.baseline_df = generate_mock_data()
-    if "drivers_df" not in st.session_state:
-        st.session_state.drivers_df = pd.DataFrame(
-            [
-                {
-                    "driver": "benefits_load_pct",
-                    "value": 0.24,
-                    "description": "Benefits and payroll burden as percentage of salary",
-                },
-                {
-                    "driver": "annual_merit_pct",
-                    "value": 0.03,
-                    "description": "Annual merit increase assumption",
-                },
-            ]
-        )
-    if "rules_df" not in st.session_state:
-        st.session_state.rules_df = pd.DataFrame(
-            [
-                {
-                    "rule": "cost_formula",
-                    "value": "fte * average_salary / 12 * (1 + benefits_load_pct)",
-                    "description": "Monthly total labor cost calculation",
-                },
-                {
-                    "rule": "fte_precision",
-                    "value": "2",
-                    "description": "FTE values rounded to two decimals",
-                },
-            ]
-        )
-    if "simulation_df" not in st.session_state:
-        st.session_state.simulation_df = st.session_state.baseline_df.copy()
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = [
-            {
-                "role": "assistant",
-                "content": "Enter a workforce simulation, such as: Hire 10 FTE in Prague starting 2026-04 at 72000 salary.",
-            }
-        ]
-    if "summary" not in st.session_state:
-        st.session_state.summary = [
-            "No simulation changes applied yet.",
-            "FTE impact: 0.00",
-            "Labor cost impact: $0",
-        ]
-    if "validation_messages" not in st.session_state:
-        st.session_state.validation_messages = []
-    if "applied_actions" not in st.session_state:
-        st.session_state.applied_actions = []
-
-
-def generate_mock_data() -> pd.DataFrame:
-    months = pd.date_range("2026-01-01", periods=12, freq="MS")
-    records = []
-    role_mix = [
-        ("Commercial", "Prague", 82, 72000),
-        ("Operations", "Dublin", 105, 68000),
-        ("Manufacturing", "Berlin", 128, 64000),
-        ("Finance", "Prague", 36, 78000),
-        ("Technology", "Tel Aviv", 54, 92000),
-    ]
-
-    for month_index, month in enumerate(months):
-        for role, location, base_fte, salary in role_mix:
-            growth = month_index * 0.35
-            seasonal = 1.5 if month.month in [6, 7, 8] and role == "Manufacturing" else 0
-            fte = round(base_fte + growth + seasonal, 2)
-            average_salary = salary * (1 + 0.002 * month_index)
-            total_cost = fte * average_salary / 12 * 1.24
-            records.append(
-                {
-                    "month": month.strftime("%Y-%m"),
-                    "role": role,
-                    "location": location,
-                    "fte": fte,
-                    "average_salary": round(average_salary, 2),
-                    "total_cost_of_labor": round(total_cost, 2),
-                }
-            )
-
-    return pd.DataFrame(records)
-
-
-def validate_excel_sheets(excel_file: Any) -> Tuple[bool, List[str]]:
-    messages = []
-    try:
-        workbook = pd.ExcelFile(excel_file)
-    except Exception as exc:
-        return False, [f"Unable to read Excel file: {exc}"]
-
-    required_sheets = {BASELINE_SHEET, DRIVERS_SHEET, RULES_SHEET}
-    missing_sheets = required_sheets - set(workbook.sheet_names)
-    if missing_sheets:
-        messages.append("Missing required sheet(s): " + ", ".join(sorted(missing_sheets)))
-
-    requirements = {
-        BASELINE_SHEET: BASELINE_COLUMNS,
-        DRIVERS_SHEET: DRIVERS_COLUMNS,
-        RULES_SHEET: RULES_COLUMNS,
-    }
-    for sheet, required_columns in requirements.items():
-        if sheet not in workbook.sheet_names:
-            continue
-        try:
-            df = pd.read_excel(workbook, sheet_name=sheet)
-        except Exception as exc:
-            messages.append(f"Unable to read sheet '{sheet}': {exc}")
-            continue
-        normalized_columns = {str(col).strip().lower().replace(" ", "_") for col in df.columns}
-        missing_columns = required_columns - normalized_columns
-        if missing_columns:
-            messages.append(f"Sheet '{sheet}' missing column(s): " + ", ".join(sorted(missing_columns)))
-
-    return len(messages) == 0, messages
-
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    clean_df = df.copy()
-    clean_df.columns = [str(col).strip().lower().replace(" ", "_") for col in clean_df.columns]
-    return clean_df
-
-
-def load_excel_data(excel_file: Any) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    baseline_df = normalize_columns(pd.read_excel(excel_file, sheet_name=BASELINE_SHEET))
-    drivers_df = normalize_columns(pd.read_excel(excel_file, sheet_name=DRIVERS_SHEET))
-    rules_df = normalize_columns(pd.read_excel(excel_file, sheet_name=RULES_SHEET))
-
-    baseline_df["month"] = baseline_df["month"].astype(str).str.slice(0, 7)
-    baseline_df["fte"] = pd.to_numeric(baseline_df["fte"], errors="coerce").fillna(0)
-    baseline_df["average_salary"] = pd.to_numeric(baseline_df["average_salary"], errors="coerce").fillna(0)
-    baseline_df["total_cost_of_labor"] = pd.to_numeric(
-        baseline_df["total_cost_of_labor"], errors="coerce"
-    ).fillna(0)
-
-    return baseline_df, drivers_df, rules_df
-
-
-def expected_excel_structure() -> None:
-    with st.expander("Expected Excel sheet structure", expanded=False):
-        st.markdown(
-            """
-            Upload an `.xlsx` workbook with exactly these sheets:
-
-            **Baseline**
-            - `month`: Month in `YYYY-MM` format
-            - `role`: Workforce role or job family
-            - `location`: Workforce location
-            - `fte`: Full-time equivalent headcount
-            - `average_salary`: Annual average salary
-            - `total_cost_of_labor`: Monthly total labor cost
-
-            **Drivers**
-            - `driver`: Driver name, such as `benefits_load_pct`
-            - `value`: Driver value
-            - `description`: Business description
-
-            **Rules**
-            - `rule`: Calculation rule name
-            - `value`: Rule expression or parameter
-            - `description`: Business description
-            """
-        )
-
-
-def get_openai_api_key() -> str:
-    try:
-        if "OPENAI_API_KEY" in st.secrets:
-            return st.secrets["OPENAI_API_KEY"]
-    except Exception:
-        pass
-    return os.getenv("OPENAI_API_KEY", "")
-
-
-def call_openai_api(user_instruction: str, context: Dict[str, Any]) -> Dict[str, Any]:
-    api_key = get_openai_api_key()
-    if not api_key:
-        return parse_simulation_instruction_fallback(user_instruction)
-
-    system_prompt = f"""
-You are a workforce planning simulation parser.
-
-Return only valid JSON matching this schema:
-{json.dumps(SIMULATION_SCHEMA, indent=2)}
-
-Rules:
-- Interpret hiring as positive fte_delta.
-- Interpret layoffs as negative fte_delta.
-- Interpret salary changes as salary_pct_change decimal, for example 5% = 0.05.
-- If a date is missing, use the earliest available month from context.
-- If cost impact is explicit, place it in cost_delta.
-- Keep descriptions concise and business friendly.
-- Do not include markdown or explanatory text.
-"""
-    user_prompt = {
-        "instruction": user_instruction,
-        "available_months": context.get("months", []),
-        "roles": context.get("roles", []),
-        "locations": context.get("locations", []),
-        "drivers": context.get("drivers", []),
-        "rules": context.get("rules", []),
-    }
-
-    try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_prompt)},
-            ],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content
-        parsed = json.loads(content)
-        return normalize_simulation_response(parsed, user_instruction)
-    except Exception:
-        return parse_simulation_instruction_fallback(user_instruction)
-
-
-def parse_simulation_instruction_fallback(user_instruction: str) -> Dict[str, Any]:
-    text = user_instruction.lower()
-    action_type = "cost_driver_change"
-    fte_delta = 0.0
-    cost_delta = 0.0
-    salary_pct_change = 0.0
-
-    month_match = re.search(r"(20\d{2})[-/](0[1-9]|1[0-2])", text)
-    month = month_match.group(0).replace("/", "-") if month_match else ""
-    number_match = re.search(r"(-?\d+(?:\.\d+)?)", text)
-    amount = float(number_match.group(1)) if number_match else 0.0
-    pct_match = re.search(r"(-?\d+(?:\.\d+)?)\s?%", text)
-    money_match = re.search(r"\$?\s?(-?\d+(?:,\d{3})*(?:\.\d+)?)", text)
-
-    if any(word in text for word in ["hire", "hiring", "add", "recruit"]):
-        action_type = "hire"
-        fte_delta = abs(amount)
-    elif any(word in text for word in ["layoff", "lay off", "reduce", "reduction", "terminate"]):
-        action_type = "layoff"
-        fte_delta = -abs(amount)
-    elif any(word in text for word in ["salary", "merit", "pay", "wage", "compensation"]):
-        action_type = "salary_change"
-        salary_pct_change = float(pct_match.group(1)) / 100 if pct_match else amount / 100 if abs(amount) <= 100 else 0
-    elif "role" in text:
-        action_type = "role_change"
-    elif "location" in text or "move" in text or "relocate" in text:
-        action_type = "location_change"
-    elif money_match and any(word in text for word in ["cost", "driver", "benefit", "tax"]):
-        action_type = "cost_driver_change"
-        cost_delta = float(money_match.group(1).replace(",", ""))
-
-    role = extract_known_value(user_instruction, ["Commercial", "Operations", "Manufacturing", "Finance", "Technology"])
-    location = extract_known_value(user_instruction, ["Prague", "Dublin", "Berlin", "Tel Aviv", "London", "New York"])
-
-    return {
-        "actions": [
-            {
-                "type": action_type,
-                "month": month,
-                "fte_delta": fte_delta,
-                "cost_delta": cost_delta,
-                "salary_pct_change": salary_pct_change,
-                "role": role,
-                "location": location,
-                "description": user_instruction[:100],
-            }
-        ]
-    }
-
-
-def extract_known_value(text: str, candidates: List[str]) -> str:
-    lower_text = text.lower()
-    for candidate in candidates:
-        if candidate.lower() in lower_text:
-            return candidate
-    return ""
-
-
-def normalize_simulation_response(response: Dict[str, Any], source_text: str) -> Dict[str, Any]:
-    actions = response.get("actions", [])
-    if not isinstance(actions, list):
-        actions = []
-
-    normalized_actions = []
-    for action in actions:
-        if not isinstance(action, dict):
-            continue
-        normalized_actions.append(
-            {
-                "type": str(action.get("type", "cost_driver_change")),
-                "month": str(action.get("month", ""))[:7],
-                "fte_delta": safe_float(action.get("fte_delta", 0)),
-                "cost_delta": safe_float(action.get("cost_delta", 0)),
-                "salary_pct_change": safe_float(action.get("salary_pct_change", 0)),
-                "role": str(action.get("role", "")),
-                "location": str(action.get("location", "")),
-                "description": str(action.get("description", source_text))[:100],
-            }
-        )
-
-    if not normalized_actions:
-        return parse_simulation_instruction_fallback(source_text)
-    return {"actions": normalized_actions}
-
-
-def safe_float(value: Any) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return 0.0
-
-
-def build_gpt_context(
-    baseline_df: pd.DataFrame,
-    drivers_df: pd.DataFrame,
-    rules_df: pd.DataFrame,
-) -> Dict[str, Any]:
-    return {
-        "months": sorted(baseline_df["month"].astype(str).unique().tolist()),
-        "roles": sorted(baseline_df["role"].astype(str).unique().tolist()),
-        "locations": sorted(baseline_df["location"].astype(str).unique().tolist()),
-        "drivers": drivers_df.to_dict("records"),
-        "rules": rules_df.to_dict("records"),
-    }
-
-
-def apply_simulation_logic(
-    baseline_df: pd.DataFrame,
-    simulation_response: Dict[str, Any],
-    drivers_df: pd.DataFrame,
-) -> pd.DataFrame:
-    simulation_df = baseline_df.copy()
-    if simulation_df.empty:
-        return simulation_df
-
-    available_months = sorted(simulation_df["month"].astype(str).unique().tolist())
-    default_month = available_months[0]
-    benefits_load_pct = get_driver_value(drivers_df, "benefits_load_pct", 0.24)
-
-    for action in simulation_response.get("actions", []):
-        action_type = action.get("type", "")
-        start_month = action.get("month") or default_month
-        role = action.get("role") or None
-        location = action.get("location") or None
-        fte_delta = safe_float(action.get("fte_delta", 0))
-        cost_delta = safe_float(action.get("cost_delta", 0))
-        salary_pct_change = safe_float(action.get("salary_pct_change", 0))
-
-        month_mask = simulation_df["month"].astype(str) >= start_month
-        role_mask = simulation_df["role"].astype(str).eq(role) if role else pd.Series(True, index=simulation_df.index)
-        location_mask = (
-            simulation_df["location"].astype(str).eq(location)
-            if location
-            else pd.Series(True, index=simulation_df.index)
-        )
-        target_mask = month_mask & role_mask & location_mask
-        if not target_mask.any():
-            target_mask = month_mask
-
-        target_indices = simulation_df[target_mask].index
-
-        if action_type in ["hire", "layoff"] and fte_delta != 0:
-            monthly_count = simulation_df.loc[target_indices].groupby("month").size()
-            for idx in target_indices:
-                month = simulation_df.at[idx, "month"]
-                spread_delta = fte_delta / max(monthly_count.get(month, 1), 1)
-                simulation_df.at[idx, "fte"] = max(0, simulation_df.at[idx, "fte"] + spread_delta)
-        elif action_type == "salary_change" and salary_pct_change != 0:
-            simulation_df.loc[target_indices, "average_salary"] = (
-                simulation_df.loc[target_indices, "average_salary"] * (1 + salary_pct_change)
-            )
-        elif action_type == "cost_driver_change" and cost_delta != 0:
-            monthly_count = simulation_df.loc[target_indices].groupby("month").size()
-            for idx in target_indices:
-                month = simulation_df.at[idx, "month"]
-                spread_delta = cost_delta / max(monthly_count.get(month, 1), 1)
-                simulation_df.at[idx, "total_cost_of_labor"] = (
-                    simulation_df.at[idx, "total_cost_of_labor"] + spread_delta
-                )
-        elif action_type == "role_change" and role:
-            simulation_df.loc[target_indices, "role"] = role
-        elif action_type == "location_change" and location:
-            simulation_df.loc[target_indices, "location"] = location
-
-        if action_type != "cost_driver_change":
-            simulation_df.loc[target_indices, "total_cost_of_labor"] = (
-                simulation_df.loc[target_indices, "fte"]
-                * simulation_df.loc[target_indices, "average_salary"]
-                / 12
-                * (1 + benefits_load_pct)
-            )
-
-    simulation_df["fte"] = simulation_df["fte"].round(2)
-    simulation_df["average_salary"] = simulation_df["average_salary"].round(2)
-    simulation_df["total_cost_of_labor"] = simulation_df["total_cost_of_labor"].round(2)
-    return simulation_df
-
-
-def get_driver_value(drivers_df: pd.DataFrame, driver_name: str, default: float) -> float:
-    if drivers_df.empty or "driver" not in drivers_df.columns or "value" not in drivers_df.columns:
-        return default
-    matches = drivers_df[drivers_df["driver"].astype(str).str.lower() == driver_name.lower()]
-    if matches.empty:
-        return default
-    return safe_float(matches.iloc[0]["value"])
-
-
-def aggregate_monthly(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=["month", "fte", "total_cost_of_labor"])
-    return (
-        df.groupby("month", as_index=False)
-        .agg(fte=("fte", "sum"), total_cost_of_labor=("total_cost_of_labor", "sum"))
-        .sort_values("month")
-    )
-
-
-def generate_impact_summary(
-    baseline_df: pd.DataFrame,
-    simulation_df: pd.DataFrame,
-    applied_actions: List[Dict[str, Any]],
-) -> List[str]:
-    baseline_total = aggregate_monthly(baseline_df)
-    simulation_total = aggregate_monthly(simulation_df)
-    baseline_fte = baseline_total["fte"].iloc[-1] if not baseline_total.empty else 0
-    simulation_fte = simulation_total["fte"].iloc[-1] if not simulation_total.empty else 0
-    baseline_cost = baseline_total["total_cost_of_labor"].sum() if not baseline_total.empty else 0
-    simulation_cost = simulation_total["total_cost_of_labor"].sum() if not simulation_total.empty else 0
-
-    summary = [
-        f"FTE impact: {simulation_fte - baseline_fte:+.2f}",
-        f"Labor cost impact: ${simulation_cost - baseline_cost:+,.0f}",
-    ]
-    for action in applied_actions[-4:]:
-        summary.append(action.get("description", "Simulation change applied.")[:100])
-    return summary[:6]
-
-
 def render_header() -> None:
     st.markdown(
         f"""
-        <div class="app-header">
-            <div class="header-logo">
-                <img src="{LOGO_URL}" alt="Company logo">
-                <span>Teva</span>
+        <div class="main-header">
+            <div class="logo-box">
+                <div class="logo-placeholder">TEVA</div>
+                <div>Company Logo</div>
             </div>
-            <div class="header-title">Workforce Planning Simulation Report</div>
-            <div class="header-user">
-                <span>TEST USER</span>
+            <div class="report-title">{REPORT_TITLE}</div>
+            <div class="user-box">
+                <div>TEST USER</div>
                 <div class="avatar-placeholder"></div>
             </div>
         </div>
@@ -661,207 +763,194 @@ def render_header() -> None:
     )
 
 
-def render_metric_cards(baseline_df: pd.DataFrame, simulation_df: pd.DataFrame) -> None:
-    baseline_monthly = aggregate_monthly(baseline_df)
-    simulation_monthly = aggregate_monthly(simulation_df)
-    baseline_fte = baseline_monthly["fte"].iloc[-1] if not baseline_monthly.empty else 0
-    simulation_fte = simulation_monthly["fte"].iloc[-1] if not simulation_monthly.empty else 0
-    baseline_cost = baseline_monthly["total_cost_of_labor"].sum() if not baseline_monthly.empty else 0
-    simulation_cost = simulation_monthly["total_cost_of_labor"].sum() if not simulation_monthly.empty else 0
+def render_excel_structure_help() -> None:
+    with st.expander("Expected Excel structure"):
+        st.markdown(
+            """
+            Upload one Excel file with these sheets:
 
-    st.markdown(
-        f"""
-        <div class="metric-row">
-            <div class="metric-card">
-                <div class="metric-label">Baseline FTE</div>
-                <div class="metric-value">{baseline_fte:,.2f}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Simulation FTE</div>
-                <div class="metric-value">{simulation_fte:,.2f}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Total Labor Cost Impact</div>
-                <div class="metric-value">${simulation_cost - baseline_cost:+,.0f}</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            **Sheet: Baseline**
 
+            | Month | Role | Location | FTE | AverageSalary | CostDriverPct |
+            |---|---|---|---:|---:|---:|
+            | 2026-01-01 | Engineer | Prague | 10 | 5200 | 0.18 |
 
-def render_grouped_column_chart(
-    baseline_df: pd.DataFrame,
-    simulation_df: pd.DataFrame,
-    metric: str,
-    title: str,
-    y_axis_title: str,
-    value_prefix: str = "",
-) -> None:
-    baseline_monthly = aggregate_monthly(baseline_df)
-    simulation_monthly = aggregate_monthly(simulation_df)
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=baseline_monthly["month"],
-            y=baseline_monthly[metric],
-            name="Baseline",
-            marker_color="#2563eb",
-            hovertemplate=f"%{{x}}<br>Baseline: {value_prefix}%{{y:,.2f}}<extra></extra>",
+            **Sheet: Drivers**
+
+            | DriverName | DriverType | Value | EffectiveMonth |
+            |---|---|---:|---|
+            | Payroll tax | Cost | 0.18 | 2026-01-01 |
+
+            **Sheet: Rules**
+
+            | RuleName | RuleType | Value |
+            |---|---|---|
+            | Monthly labor cost | Calculation | FTE * AverageSalary * (1 + CostDriverPct) |
+            """
         )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=simulation_monthly["month"],
-            y=simulation_monthly[metric],
-            name="Simulation",
-            marker_color="#f97316",
-            hovertemplate=f"%{{x}}<br>Simulation: {value_prefix}%{{y:,.2f}}<extra></extra>",
-        )
-    )
-    fig.update_layout(
-        title={"text": title, "font": {"size": 18, "color": "#172033"}},
-        barmode="group",
-        height=340,
-        margin={"l": 45, "r": 20, "t": 55, "b": 45},
-        plot_bgcolor="#ffffff",
-        paper_bgcolor="#ffffff",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
-        xaxis={"title": "", "showgrid": False, "tickangle": -30},
-        yaxis={"title": y_axis_title, "gridcolor": "#edf0f5", "zerolinecolor": "#d9dee8"},
-        font={"family": "Arial, sans-serif", "color": "#27364f"},
-    )
-    st.plotly_chart(fig, use_container_width=True)
 
 
-def render_impact_summary(summary: List[str]) -> None:
-    st.markdown('<div class="summary-box">', unsafe_allow_html=True)
-    st.markdown('<div class="summary-title">Applied Simulation Impact Summary</div>', unsafe_allow_html=True)
-    for item in summary[:6]:
-        st.markdown(f"- {item[:100]}")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def render_api_connector_placeholder() -> None:
-    st.markdown(
-        """
-        <div class="api-placeholder">
-            <strong>Future API connector placeholder</strong><br>
-            Ready for HRIS, payroll, finance planning, and data warehouse integrations.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_chat_panel() -> None:
-    st.markdown('<div class="left-panel">', unsafe_allow_html=True)
-    st.markdown('<div class="panel-title">Simulation Chat</div>', unsafe_allow_html=True)
-    st.markdown(
-        """
-        <div class="panel-subtitle">
-            Use plain language to model hiring, layoffs, salary, role, location,
-            and cost-driver changes.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    uploaded_file = st.file_uploader("Upload workforce Excel workbook", type=["xlsx"])
-    if uploaded_file is not None:
-        is_valid, messages = validate_excel_sheets(uploaded_file)
-        st.session_state.validation_messages = messages
-        if is_valid:
-            baseline_df, drivers_df, rules_df = load_excel_data(uploaded_file)
-            st.session_state.baseline_df = baseline_df
-            st.session_state.drivers_df = drivers_df
-            st.session_state.rules_df = rules_df
-            st.session_state.simulation_df = baseline_df.copy()
-            st.success("Excel data loaded successfully.")
-        else:
-            for message in messages:
-                st.error(message)
-
-    expected_excel_structure()
-    st.divider()
-
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-
-    prompt = st.chat_input("Enter simulation instruction")
-    if prompt:
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
-        context = build_gpt_context(
-            st.session_state.baseline_df,
-            st.session_state.drivers_df,
-            st.session_state.rules_df,
-        )
-        simulation_response = call_openai_api(prompt, context)
-        actions = simulation_response.get("actions", [])
-        st.session_state.applied_actions.extend(actions)
-        st.session_state.simulation_df = apply_simulation_logic(
-            st.session_state.simulation_df,
-            simulation_response,
-            st.session_state.drivers_df,
-        )
-        st.session_state.summary = generate_impact_summary(
-            st.session_state.baseline_df,
-            st.session_state.simulation_df,
-            st.session_state.applied_actions,
-        )
-        assistant_message = "Simulation applied and dashboard updated."
-        if actions:
-            assistant_message = actions[0].get("description", assistant_message)
-        st.session_state.chat_history.append({"role": "assistant", "content": assistant_message})
-        st.rerun()
-
-    if st.button("Reset simulation", use_container_width=True):
-        st.session_state.simulation_df = st.session_state.baseline_df.copy()
-        st.session_state.applied_actions = []
-        st.session_state.summary = [
-            "No simulation changes applied yet.",
-            "FTE impact: 0.00",
-            "Labor cost impact: $0",
-        ]
-        st.session_state.chat_history = [
-            {"role": "assistant", "content": "Simulation reset. Enter a new workforce planning change."}
-        ]
-        st.rerun()
-
-    render_api_connector_placeholder()
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def render_report_panel() -> None:
-    render_metric_cards(st.session_state.baseline_df, st.session_state.simulation_df)
-    render_grouped_column_chart(
-        st.session_state.baseline_df,
-        st.session_state.simulation_df,
-        metric="fte",
-        title="FTE Over Time",
-        y_axis_title="FTE",
-    )
-    render_grouped_column_chart(
-        st.session_state.baseline_df,
-        st.session_state.simulation_df,
-        metric="total_cost_of_labor",
-        title="Total Cost of Labor Over Time",
-        y_axis_title="Total Cost of Labor",
-        value_prefix="$",
-    )
-    render_impact_summary(st.session_state.summary)
-
+# ============================================================
+# Main app
+# ============================================================
 
 def main() -> None:
-    inject_css()
     initialize_session_state()
+    apply_custom_css()
     render_header()
-    left_col, right_col = st.columns([1, 4], gap="medium")
-    with left_col:
-        render_chat_panel()
-    with right_col:
-        render_report_panel()
+
+    left_panel, right_panel = st.columns([1, 4], gap="large")
+
+    with left_panel:
+        st.markdown('<div class="chat-panel">', unsafe_allow_html=True)
+        st.subheader("GPT Simulation Entry")
+
+        uploaded_file = st.file_uploader(
+            "Upload workforce Excel file",
+            type=["xlsx"],
+        )
+
+        if uploaded_file:
+            try:
+                baseline_df, drivers_df, rules_df = load_excel_data(uploaded_file)
+
+                st.session_state.baseline_df = baseline_df
+                st.session_state.drivers_df = drivers_df
+                st.session_state.rules_df = rules_df
+                st.session_state.simulation_events = []
+                st.session_state.simulation_df = apply_simulation_logic(
+                    baseline_df,
+                    [],
+                )
+                st.session_state.data_source = uploaded_file.name
+
+                st.success("Excel file loaded successfully.")
+
+            except Exception as exc:
+                st.error(str(exc))
+
+        render_excel_structure_help()
+
+        st.caption(f"Data source: {st.session_state.data_source}")
+
+        st.divider()
+
+        for message in st.session_state.chat_messages:
+            with st.chat_message(message["role"]):
+                st.write(message["content"])
+
+        user_prompt = st.chat_input("Enter simulation instruction...")
+
+        if user_prompt:
+            st.session_state.chat_messages.append(
+                {"role": "user", "content": user_prompt}
+            )
+
+            parsed_response = call_openai_api(user_prompt)
+            st.session_state.simulation_events.append(parsed_response)
+
+            st.session_state.simulation_df = apply_simulation_logic(
+                st.session_state.baseline_df,
+                st.session_state.simulation_events,
+            )
+
+            assistant_response = parsed_response.get(
+                "summary",
+                "Simulation change applied.",
+            )
+
+            st.session_state.chat_messages.append(
+                {
+                    "role": "assistant",
+                    "content": f"Applied: {assistant_response}",
+                }
+            )
+
+            st.rerun()
+
+        if st.button("Reset simulation", use_container_width=True):
+            st.session_state.simulation_events = []
+            st.session_state.simulation_df = apply_simulation_logic(
+                st.session_state.baseline_df,
+                [],
+            )
+            st.session_state.chat_messages = [
+                {
+                    "role": "assistant",
+                    "content": "Simulation reset. Enter a new workforce scenario.",
+                }
+            ]
+            st.rerun()
+
+        with st.expander("API connector placeholder"):
+            st.json(future_data_connector())
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with right_panel:
+        baseline_monthly = aggregate_monthly(st.session_state.baseline_df)
+        simulation_monthly = aggregate_monthly(st.session_state.simulation_df)
+
+        baseline_total_fte = baseline_monthly["FTE"].sum()
+        simulation_total_fte = simulation_monthly["FTE"].sum()
+        baseline_total_cost = baseline_monthly["TotalCostOfLabor"].sum()
+        simulation_total_cost = simulation_monthly["TotalCostOfLabor"].sum()
+
+        st.markdown('<div class="dashboard-panel">', unsafe_allow_html=True)
+
+        kpi_1, kpi_2, kpi_3, kpi_4 = st.columns(4)
+
+        kpi_1.metric(
+            "Baseline FTE",
+            f"{baseline_total_fte:,.1f}",
+        )
+
+        kpi_2.metric(
+            "Simulation FTE",
+            f"{simulation_total_fte:,.1f}",
+            delta=f"{simulation_total_fte - baseline_total_fte:+,.1f}",
+        )
+
+        kpi_3.metric(
+            "Baseline Labor Cost",
+            f"€{baseline_total_cost:,.0f}",
+        )
+
+        kpi_4.metric(
+            "Simulation Labor Cost",
+            f"€{simulation_total_cost:,.0f}",
+            delta=f"€{simulation_total_cost - baseline_total_cost:+,.0f}",
+        )
+
+        st.plotly_chart(
+            render_grouped_bar_chart(
+                "FTE over Time",
+                baseline_monthly,
+                simulation_monthly,
+                "FTE",
+                "FTE",
+            ),
+            use_container_width=True,
+        )
+
+        st.plotly_chart(
+            render_grouped_bar_chart(
+                "Total Cost of Labor over Time",
+                baseline_monthly,
+                simulation_monthly,
+                "TotalCostOfLabor",
+                "Total Cost of Labor",
+            ),
+            use_container_width=True,
+        )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        render_impact_summary(
+            st.session_state.baseline_df,
+            st.session_state.simulation_df,
+            st.session_state.simulation_events,
+        )
 
 
 if __name__ == "__main__":
