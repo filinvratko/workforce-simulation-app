@@ -257,7 +257,7 @@ def load_calculation_rules(uploaded_file) -> pd.DataFrame:
 
 
 # ============================================================
-# Reupload / reset baseline
+# Baseline replacement logic
 # ============================================================
 
 def replace_baseline_with_uploaded_data(uploaded_file) -> None:
@@ -269,10 +269,7 @@ def replace_baseline_with_uploaded_data(uploaded_file) -> None:
     st.session_state.chat_messages = [
         {
             "role": "assistant",
-            "content": (
-                "New Data Sample uploaded. Baseline was replaced and "
-                "simulation was reset."
-            ),
+            "content": "New Data Sample uploaded. Baseline replaced and simulation reset.",
         }
     ]
 
@@ -281,10 +278,11 @@ def reset_to_mock_baseline() -> None:
     st.session_state.data_sample_df = generate_mock_source_data()
     st.session_state.data_sample_source = "Mock data"
     st.session_state.simulation_events = []
+    st.session_state.last_data_sample_upload_id = None
     st.session_state.chat_messages = [
         {
             "role": "assistant",
-            "content": "Baseline reset to mock data. Simulation was cleared.",
+            "content": "Baseline reset to mock data. Simulation cleared.",
         }
     ]
 
@@ -849,6 +847,15 @@ def initialize_state():
     if "rules_source" not in st.session_state:
         st.session_state.rules_source = "Mock rules"
 
+    if "last_data_sample_upload_id" not in st.session_state:
+        st.session_state.last_data_sample_upload_id = None
+
+    if "last_drivers_upload_id" not in st.session_state:
+        st.session_state.last_drivers_upload_id = None
+
+    if "last_rules_upload_id" not in st.session_state:
+        st.session_state.last_rules_upload_id = None
+
 
 # ============================================================
 # Main app
@@ -858,21 +865,6 @@ def main():
     initialize_state()
     apply_css()
     render_header()
-
-    try:
-        baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
-        simulation_df = apply_simulation_logic(
-            baseline_monthly,
-            st.session_state.simulation_events,
-        )
-    except Exception as exc:
-        st.error(f"Data preparation error: {exc}")
-        return
-
-    baseline_total_fte = simulation_df["BaselineFTE"].sum()
-    simulation_total_fte = simulation_df["SimulationFTE"].sum()
-    baseline_total_usd = simulation_df["BaselineUSD"].sum()
-    simulation_total_usd = simulation_df["SimulationUSD"].sum()
 
     left, right = st.columns([1, 4], gap="large")
 
@@ -886,13 +878,17 @@ def main():
             help="Reuploading replaces the current baseline and clears simulation.",
         )
 
-        if data_file:
-            try:
-                replace_baseline_with_uploaded_data(data_file)
-                st.success("Baseline replaced with uploaded Data Sample.")
-                st.rerun()
-            except Exception as exc:
-                st.warning(str(exc))
+        if data_file is not None:
+            upload_id = f"{data_file.name}_{data_file.size}"
+
+            if upload_id != st.session_state.last_data_sample_upload_id:
+                try:
+                    replace_baseline_with_uploaded_data(data_file)
+                    st.session_state.last_data_sample_upload_id = upload_id
+                    st.success("Baseline replaced with uploaded Data Sample.")
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(str(exc))
 
         if st.button("Reset baseline to mock data", use_container_width=True):
             reset_to_mock_baseline()
@@ -904,14 +900,18 @@ def main():
             key="drivers_uploader",
         )
 
-        if drivers_file:
-            try:
-                st.session_state.drivers_df = load_drivers(drivers_file)
-                st.session_state.drivers_source = drivers_file.name
-                st.success("Drivers loaded.")
-                st.rerun()
-            except Exception as exc:
-                st.warning(str(exc))
+        if drivers_file is not None:
+            upload_id = f"{drivers_file.name}_{drivers_file.size}"
+
+            if upload_id != st.session_state.last_drivers_upload_id:
+                try:
+                    st.session_state.drivers_df = load_drivers(drivers_file)
+                    st.session_state.drivers_source = drivers_file.name
+                    st.session_state.last_drivers_upload_id = upload_id
+                    st.success("Drivers loaded.")
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(str(exc))
 
         calc_file = st.file_uploader(
             "Upload Calculation_method",
@@ -919,14 +919,18 @@ def main():
             key="calculation_method_uploader",
         )
 
-        if calc_file:
-            try:
-                st.session_state.rules_df = load_calculation_rules(calc_file)
-                st.session_state.rules_source = calc_file.name
-                st.success("Calculation method loaded.")
-                st.rerun()
-            except Exception as exc:
-                st.warning(str(exc))
+        if calc_file is not None:
+            upload_id = f"{calc_file.name}_{calc_file.size}"
+
+            if upload_id != st.session_state.last_rules_upload_id:
+                try:
+                    st.session_state.rules_df = load_calculation_rules(calc_file)
+                    st.session_state.rules_source = calc_file.name
+                    st.session_state.last_rules_upload_id = upload_id
+                    st.success("Calculation method loaded.")
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(str(exc))
 
         render_excel_help()
 
@@ -971,6 +975,23 @@ def main():
                 }
             ]
             st.rerun()
+
+    # Data preparation happens AFTER upload/reupload logic
+    try:
+        baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
+        simulation_df = apply_simulation_logic(
+            baseline_monthly,
+            st.session_state.simulation_events,
+        )
+    except Exception as exc:
+        with right:
+            st.error(f"Data preparation error: {exc}")
+        return
+
+    baseline_total_fte = simulation_df["BaselineFTE"].sum()
+    simulation_total_fte = simulation_df["SimulationFTE"].sum()
+    baseline_total_usd = simulation_df["BaselineUSD"].sum()
+    simulation_total_usd = simulation_df["SimulationUSD"].sum()
 
     with right:
         c1, c2, c3, c4 = st.columns(4)
