@@ -1,7 +1,7 @@
 import os
 import json
 import re
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Any
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -30,7 +30,6 @@ DATA_SAMPLE_ROW_COLUMNS = [
     "Account",
 ]
 
-DRIVERS_REQUIRED_COLUMNS = ["Driver"]
 CALC_RULES_REQUIRED_COLUMNS = [
     "Description",
     "Global Account",
@@ -46,22 +45,16 @@ CALC_RULES_REQUIRED_COLUMNS = [
 
 def generate_mock_source_data() -> pd.DataFrame:
     months = pd.date_range("2026-01-01", periods=12, freq="MS")
-    rows = []
-
-    accounts = [
-        ("FTE", "FTE"),
-        ("Salary", "Cost"),
-        ("Benefits", "Cost"),
-        ("Tax", "Cost"),
-    ]
-
+    accounts = ["FTE", "Salary", "Benefits", "Payroll Tax"]
     employees = ["E001", "E002", "E003", "E004", "E005"]
 
-    for emp_index, employee in enumerate(employees):
-        for account, account_type in accounts:
+    rows = []
+
+    for employee in employees:
+        for account in accounts:
             row = {
                 "Company Code": "IL01",
-                "Cost Center": f"CC{100 + emp_index}",
+                "Cost Center": "CC100",
                 "Profit Center": "PC01",
                 "Business Area": "Operations",
                 "Segment": "Manufacturing",
@@ -71,11 +64,12 @@ def generate_mock_source_data() -> pd.DataFrame:
             }
 
             for i, month in enumerate(months):
-                col = month.strftime("%Y-%m")
-                if account_type == "FTE":
+                col = month.strftime("%Y%m")
+
+                if account == "FTE":
                     row[col] = 1.0
                 elif account == "Salary":
-                    row[col] = 5200 + i * 40
+                    row[col] = 5200 + i * 50
                 elif account == "Benefits":
                     row[col] = 850
                 else:
@@ -88,6 +82,7 @@ def generate_mock_source_data() -> pd.DataFrame:
 
 def generate_mock_drivers() -> pd.DataFrame:
     months = pd.date_range("2026-01-01", periods=12, freq="MS")
+
     data = {
         "Driver": [
             "Salary Increase",
@@ -99,8 +94,7 @@ def generate_mock_drivers() -> pd.DataFrame:
     }
 
     for month in months:
-        col = month.strftime("%Y-%m")
-        data[col] = [0.03, 0.02, 0.12, 0, 0]
+        data[month.strftime("%Y%m")] = [0.03, 0.02, 0.12, 0, 0]
 
     return pd.DataFrame(data)
 
@@ -111,10 +105,10 @@ def generate_mock_rules() -> pd.DataFrame:
             "Description": [
                 "Salary accounts use salary driver",
                 "Benefits accounts use benefits driver",
-                "Tax accounts use payroll tax driver",
+                "Payroll tax accounts use tax driver",
                 "FTE account identifies workforce volume",
             ],
-            "Global Account": ["Salary", "Benefits", "Tax", "FTE"],
+            "Global Account": ["Salary", "Benefits", "Payroll Tax", "FTE"],
             "SAC Driver": [
                 "Salary Increase",
                 "Benefits Increase",
@@ -133,12 +127,23 @@ def generate_mock_rules() -> pd.DataFrame:
 
 
 # ============================================================
-# Validation
+# Excel helpers
 # ============================================================
 
-def validate_sheet_exists(sheets: Dict[str, pd.DataFrame], sheet_name: str) -> None:
+def read_excel_sheet(uploaded_file, sheet_name: str) -> pd.DataFrame:
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "Excel upload requires openpyxl. Add openpyxl to requirements.txt."
+        )
+
+    sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl")
+
     if sheet_name not in sheets:
         raise ValueError(f"Missing required sheet: {sheet_name}")
+
+    return sheets[sheet_name].copy()
 
 
 def validate_required_columns(
@@ -154,80 +159,52 @@ def validate_required_columns(
         )
 
 
-def detect_month_columns(df: pd.DataFrame) -> List[str]:
-    non_month_columns = set(DATA_SAMPLE_ROW_COLUMNS + ["Version"])
-    month_columns = []
-
-    for col in df.columns:
-        if col in non_month_columns:
-            continue
-
-        parsed = pd.to_datetime(str(col), errors="coerce")
-
-        if pd.notna(parsed):
-            month_columns.append(col)
-            continue
-
-        if re.match(r"^\d{4}-\d{2}$", str(col)):
-            month_columns.append(col)
-
-    return month_columns
+def is_yyyymm_column(column_name: Any) -> bool:
+    text = str(column_name).strip()
+    return bool(re.fullmatch(r"\d{6}", text))
 
 
-def normalize_month_column_name(col: Any) -> str:
-    parsed = pd.to_datetime(str(col), errors="coerce")
+def validate_yyyymm_columns(df: pd.DataFrame, excluded_columns: List[str], sheet: str) -> List[str]:
+    date_columns = [col for col in df.columns if col not in excluded_columns and is_yyyymm_column(col)]
 
-    if pd.notna(parsed):
-        return parsed.strftime("%Y-%m")
+    if not date_columns:
+        raise ValueError(
+            f"Sheet '{sheet}' must contain monthly date columns in YYYYMM format, e.g. 202601."
+        )
 
-    return str(col)
+    return date_columns
 
 
-def normalize_month_columns(df: pd.DataFrame) -> pd.DataFrame:
-    result = df.copy()
+def normalize_yyyymm_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {}
 
-    for col in result.columns:
-        if col not in DATA_SAMPLE_ROW_COLUMNS + ["Version"]:
-            parsed = pd.to_datetime(str(col), errors="coerce")
-            if pd.notna(parsed) or re.match(r"^\d{4}-\d{2}$", str(col)):
-                rename_map[col] = normalize_month_column_name(col)
+    for col in df.columns:
+        text = str(col).strip()
 
-    return result.rename(columns=rename_map)
+        if re.fullmatch(r"\d{6}", text):
+            rename_map[col] = text
+
+    return df.rename(columns=rename_map)
 
 
 # ============================================================
 # File loaders
 # ============================================================
 
-def read_excel_file(uploaded_file, sheet_name: str) -> pd.DataFrame:
-    try:
-        import openpyxl  # noqa: F401
-    except ImportError:
-        raise ImportError(
-            "Excel upload requires openpyxl. Add 'openpyxl' to requirements.txt."
-        )
-
-    sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl")
-    validate_sheet_exists(sheets, sheet_name)
-
-    return sheets[sheet_name].copy()
-
-
 def load_data_sample(uploaded_file) -> pd.DataFrame:
-    df = read_excel_file(uploaded_file, DATA_SAMPLE_SHEET)
+    df = read_excel_sheet(uploaded_file, DATA_SAMPLE_SHEET)
+    df = normalize_yyyymm_columns(df)
+
     validate_required_columns(df, DATA_SAMPLE_ROW_COLUMNS, DATA_SAMPLE_SHEET)
 
     if "Version" not in df.columns:
         df["Version"] = "Baseline"
 
-    df = normalize_month_columns(df)
-
-    month_columns = detect_month_columns(df)
-    if not month_columns:
-        raise ValueError(
-            f"Sheet '{DATA_SAMPLE_SHEET}' must contain monthly date columns."
-        )
+    month_columns = validate_yyyymm_columns(
+        df,
+        DATA_SAMPLE_ROW_COLUMNS + ["Version"],
+        DATA_SAMPLE_SHEET,
+    )
 
     for col in month_columns:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -236,18 +213,16 @@ def load_data_sample(uploaded_file) -> pd.DataFrame:
 
 
 def load_drivers(uploaded_file) -> pd.DataFrame:
-    df = read_excel_file(uploaded_file, DRIVERS_SHEET)
-    validate_required_columns(df, DRIVERS_REQUIRED_COLUMNS, DRIVERS_SHEET)
+    df = read_excel_sheet(uploaded_file, DRIVERS_SHEET)
+    df = normalize_yyyymm_columns(df)
 
-    df = normalize_month_columns(df)
+    validate_required_columns(df, ["Driver"], DRIVERS_SHEET)
 
-    month_columns = [
-        col for col in df.columns
-        if col != "Driver" and pd.to_datetime(str(col), errors="coerce") is not pd.NaT
-    ]
-
-    if not month_columns:
-        month_columns = [col for col in df.columns if col != "Driver"]
+    month_columns = validate_yyyymm_columns(
+        df,
+        ["Driver"],
+        DRIVERS_SHEET,
+    )
 
     for col in month_columns:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -256,8 +231,14 @@ def load_drivers(uploaded_file) -> pd.DataFrame:
 
 
 def load_calculation_rules(uploaded_file) -> pd.DataFrame:
-    df = read_excel_file(uploaded_file, CALC_RULES_SHEET)
-    validate_required_columns(df, CALC_RULES_REQUIRED_COLUMNS, CALC_RULES_SHEET)
+    df = read_excel_sheet(uploaded_file, CALC_RULES_SHEET)
+
+    validate_required_columns(
+        df,
+        CALC_RULES_REQUIRED_COLUMNS,
+        CALC_RULES_SHEET,
+    )
+
     return df
 
 
@@ -265,29 +246,50 @@ def load_calculation_rules(uploaded_file) -> pd.DataFrame:
 # Data transformation
 # ============================================================
 
-def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
-    source_df = normalize_month_columns(source_df)
-    month_columns = detect_month_columns(source_df)
+def get_month_columns(df: pd.DataFrame, excluded_columns: List[str]) -> List[str]:
+    return [
+        col for col in df.columns
+        if col not in excluded_columns and is_yyyymm_column(col)
+    ]
 
-    long_df = source_df.melt(
+
+def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_yyyymm_columns(source_df)
+
+    month_columns = get_month_columns(
+        df,
+        DATA_SAMPLE_ROW_COLUMNS + ["Version"],
+    )
+
+    long_df = df.melt(
         id_vars=DATA_SAMPLE_ROW_COLUMNS + ["Version"],
         value_vars=month_columns,
-        var_name="Month",
+        var_name="MonthYYYYMM",
         value_name="Value",
     )
 
-    long_df["Month"] = pd.to_datetime(long_df["Month"])
+    long_df["Month"] = pd.to_datetime(long_df["MonthYYYYMM"], format="%Y%m")
     long_df["Value"] = pd.to_numeric(long_df["Value"], errors="coerce").fillna(0)
 
     fte_df = (
-        long_df[long_df["Account"].astype(str).str.lower().str.contains("fte")]
+        long_df[
+            long_df["Account"]
+            .astype(str)
+            .str.lower()
+            .str.contains("fte", na=False)
+        ]
         .groupby("Month", as_index=False)["Value"]
         .sum()
         .rename(columns={"Value": "FTE"})
     )
 
     cost_df = (
-        long_df[~long_df["Account"].astype(str).str.lower().str.contains("fte")]
+        long_df[
+            ~long_df["Account"]
+            .astype(str)
+            .str.lower()
+            .str.contains("fte", na=False)
+        ]
         .groupby("Month", as_index=False)["Value"]
         .sum()
         .rename(columns={"Value": "TotalCostOfLabor"})
@@ -300,12 +302,8 @@ def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
     return monthly
 
 
-def get_monthly_baseline() -> pd.DataFrame:
-    return source_to_monthly_baseline(st.session_state.data_sample_df)
-
-
 # ============================================================
-# GPT / parsing
+# OpenAI / fallback parser
 # ============================================================
 
 def get_openai_api_key():
@@ -343,17 +341,17 @@ JSON format:
       "cost_pct_delta": number,
       "cost_abs_delta": number,
       "driver": string or null,
-      "effective_month": "YYYY-MM-01"
+      "effective_month": "YYYYMM"
     }
   ]
 }
 
 Rules:
-- Hire: positive fte_delta.
-- Layoff: negative fte_delta.
-- Salary/cost increase: positive cost_pct_delta.
-- Salary/cost decrease: negative cost_pct_delta.
-- Use 2026-01-01 if no month is found.
+- Hire means positive fte_delta.
+- Layoff means negative fte_delta.
+- Salary/cost increase means positive cost_pct_delta.
+- Salary/cost decrease means negative cost_pct_delta.
+- Use 202601 if no month is provided.
 - Percentages must be decimals, e.g. 5% = 0.05.
 """
 
@@ -377,7 +375,7 @@ def fallback_parse_instruction(text: str) -> Dict[str, Any]:
     text = text.lower()
 
     number = extract_first_number(text)
-    month = extract_month(text)
+    month = extract_month_yyyymm(text)
 
     action = {
         "action_type": "cost_change",
@@ -416,31 +414,35 @@ def extract_first_number(text: str) -> float:
     return float(match.group()) if match else 0.0
 
 
-def extract_month(text: str) -> str:
+def extract_month_yyyymm(text: str) -> str:
+    direct_match = re.search(r"\b(20\d{2})(0[1-9]|1[0-2])\b", text)
+    if direct_match:
+        return direct_match.group()
+
     month_map = {
-        "jan": "2026-01-01", "january": "2026-01-01",
-        "feb": "2026-02-01", "february": "2026-02-01",
-        "mar": "2026-03-01", "march": "2026-03-01",
-        "apr": "2026-04-01", "april": "2026-04-01",
-        "may": "2026-05-01",
-        "jun": "2026-06-01", "june": "2026-06-01",
-        "jul": "2026-07-01", "july": "2026-07-01",
-        "aug": "2026-08-01", "august": "2026-08-01",
-        "sep": "2026-09-01", "september": "2026-09-01",
-        "oct": "2026-10-01", "october": "2026-10-01",
-        "nov": "2026-11-01", "november": "2026-11-01",
-        "dec": "2026-12-01", "december": "2026-12-01",
+        "jan": "202601", "january": "202601",
+        "feb": "202602", "february": "202602",
+        "mar": "202603", "march": "202603",
+        "apr": "202604", "april": "202604",
+        "may": "202605",
+        "jun": "202606", "june": "202606",
+        "jul": "202607", "july": "202607",
+        "aug": "202608", "august": "202608",
+        "sep": "202609", "september": "202609",
+        "oct": "202610", "october": "202610",
+        "nov": "202611", "november": "202611",
+        "dec": "202612", "december": "202612",
     }
 
     for key, value in month_map.items():
         if key in text:
             return value
 
-    return "2026-01-01"
+    return "202601"
 
 
 # ============================================================
-# Simulation logic
+# Simulation
 # ============================================================
 
 def apply_simulation_logic(
@@ -448,7 +450,7 @@ def apply_simulation_logic(
     events: List[Dict[str, Any]],
 ) -> pd.DataFrame:
     df = baseline_monthly.copy()
-    df["Month"] = pd.to_datetime(df["Month"])
+
     df["SimulationFTE"] = df["FTE"]
     df["SimulationCost"] = df["TotalCostOfLabor"]
 
@@ -461,8 +463,14 @@ def apply_simulation_logic(
     for event in events:
         for action in event.get("actions", []):
             effective_month = pd.to_datetime(
-                action.get("effective_month", "2026-01-01")
+                str(action.get("effective_month", "202601")),
+                format="%Y%m",
+                errors="coerce",
             )
+
+            if pd.isna(effective_month):
+                effective_month = pd.to_datetime("202601", format="%Y%m")
+
             mask = df["Month"] >= effective_month
 
             action_type = action.get("action_type")
@@ -485,16 +493,10 @@ def apply_simulation_logic(
 
 
 # ============================================================
-# Charts and summary
+# Charts / summary
 # ============================================================
 
-def render_chart(
-    title: str,
-    df: pd.DataFrame,
-    baseline_metric: str,
-    simulation_metric: str,
-    y_title: str,
-) -> go.Figure:
+def render_chart(title, df, baseline_metric, simulation_metric, y_title):
     fig = go.Figure()
 
     fig.add_trace(
@@ -676,13 +678,13 @@ def render_excel_help():
             - Employee
             - Account
 
-            Also supported:
+            Supported extra row column:
             - Version
 
-            Monthly values should be in columns, for example:
-            - 2026-01
-            - 2026-02
-            - 2026-03
+            Monthly values must be in columns using **YYYYMM** format:
+            - 202601
+            - 202602
+            - 202603
 
             ---
 
@@ -692,7 +694,13 @@ def render_excel_help():
 
             Required columns:
             - Driver
-            - Monthly date columns, for example 2026-01, 2026-02, 2026-03
+            - Monthly date columns in **YYYYMM** format
+
+            Example:
+            - Driver
+            - 202601
+            - 202602
+            - 202603
 
             ---
 
@@ -727,7 +735,7 @@ def initialize_state():
         st.session_state.chat_messages = [
             {
                 "role": "assistant",
-                "content": "Enter scenario, e.g. hire 10 FTE from April or reduce salary cost by 5%.",
+                "content": "Enter scenario, e.g. hire 10 FTE from 202604 or reduce cost by 5%.",
             }
         ]
 
@@ -746,7 +754,7 @@ def main():
     apply_css()
     render_header()
 
-    baseline_monthly = get_monthly_baseline()
+    baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
     simulation_df = apply_simulation_logic(
         baseline_monthly,
         st.session_state.simulation_events,
