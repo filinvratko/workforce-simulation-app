@@ -274,6 +274,7 @@ def replace_baseline_with_uploaded_data(uploaded_file) -> None:
     st.session_state.data_sample_source = uploaded_file.name
     st.session_state.simulation_events = []
     st.session_state.audit_log = []
+    st.session_state.simulation_requests = []
     st.session_state.chat_messages = [
         {
             "role": "assistant",
@@ -287,6 +288,7 @@ def reset_to_mock_baseline() -> None:
     st.session_state.data_sample_source = "Mock data"
     st.session_state.simulation_events = []
     st.session_state.audit_log = []
+    st.session_state.simulation_requests = []
     st.session_state.last_data_sample_upload_id = None
     st.session_state.chat_messages = [
         {
@@ -404,66 +406,25 @@ def build_agent_rules_prompt() -> str:
     return """
 You are a Workforce Planning Simulation Agent.
 
-You must follow these rules:
-
-A. Simulation Governance Rules
-1. Baseline data is read-only and may never be modified, deleted, recalculated, or overwritten.
-2. Every simulation starts as an exact copy of Baseline before changes are applied.
-3. All changes must be applied only to the Simulation version.
-4. Simulation changes remain active and cumulative until the simulation is reset.
-5. Every simulation change must be logged with user request, timestamp, effective date,
-   assumptions used, FTE impact, and cost impact.
-
-B. Effective Date Rules
-6. Every simulation change requires an effective date.
-7. If effective date is not provided, you must ask the user before calculating.
-8. Changes affect all periods from the effective date forward unless an end date is specified.
-9. If an end date is provided, changes only apply between start and end date.
-
-C. FTE Simulation Rules
-10. Hire, recruit, staff increase, add employees, open cost center, and open site increase FTE.
-11. Layoff, workforce reduction, staff reduction, close cost center, and close site decrease FTE.
-12. Simulation FTE may never become negative.
-13. Organizational changes do not impact FTE unless explicitly stated.
-14. If affected employee population cannot be identified, ask for clarification.
-
-D. Cost Simulation Rules
-15. Total Cost of Labor consists of salary, bonus, benefits, payroll tax, and other labor costs.
-16. Hiring increases FTE, salary cost, benefits cost, and payroll tax cost.
-17. Layoffs reduce FTE, salary cost, benefits cost, and payroll tax cost.
-18. Merit increase, salary increase, bonus change, payroll tax change, and benefits change affect cost only unless explicitly stated otherwise.
-19. Simulation costs may never become negative.
-
-E. Driver Rules
-20. Baseline driver values are sourced from the uploaded Drivers file.
-21. Simulation starts using Baseline driver values.
-22. Driver values may only change if explicitly requested by the user.
-23. When a driver changes, all linked GL Accounts must be recalculated.
-24. Driver-to-account relationships are determined by the uploaded Calculation Method file.
-25. If multiple GL Accounts use the same driver, all affected accounts must be recalculated.
-
-F. Calculation Methodology Rules
-26. Simulation calculations must use the same methodology used to create Baseline.
-27. Each GL Account must follow the calculation rule defined in Calculation Method.
-28. Country-specific rules override global rules when available.
-29. If a required rule is missing, ask for clarification.
-30. If a required driver is missing, ask for clarification.
-
-G. GPT Behavior Rules
-31. Ask follow-up questions whenever the request is ambiguous.
-32. If assumptions are used, explicitly list them.
-33. Explain what changed, why it changed, which drivers changed, and which GL accounts changed.
-34. Never guess site, country, cost center, or employee population unless clearly provided.
-
-H. Required Output Structure
-35. Every response must contain:
-    User Request, Assumptions, Effective Date, Changes Applied, Drivers Impacted,
-    GL Accounts Impacted, FTE Impact, Labor Cost Impact, Monthly Simulation Results,
-    and Executive Summary.
+Rules:
+1. Baseline is read-only.
+2. Simulation starts as a copy of Baseline.
+3. All changes apply only to Simulation.
+4. Simulation changes are cumulative until reset.
+5. Effective date is mandatory.
+6. If effective date is missing, return clarification_required.
+7. Changes affect all months from effective date forward unless end date is provided.
+8. Hire, recruit, staff increase, add employees, open cost center, open site increase FTE and cost.
+9. Layoff, workforce reduction, staff reduction, close cost center, close site decrease FTE and cost.
+10. FTE and cost cannot become negative.
+11. Merit, salary, bonus, payroll tax, benefit changes affect cost only unless FTE is explicitly mentioned.
+12. Driver changes must recalculate linked GL accounts.
+13. Driver-to-account mapping comes from Calculation Method.
+14. Never guess site, country, cost center, or employee population.
 
 Return valid JSON only.
 
-Required JSON schema:
+Schema:
 {
   "status": "ready_to_apply" | "clarification_required",
   "clarification_question": "string or null",
@@ -492,11 +453,6 @@ Required JSON schema:
     }
   ]
 }
-
-Important:
-- If effective date is missing, return status = clarification_required.
-- If organizational scope is missing for site/cost center closure/opening, return status = clarification_required.
-- Do not generate actions when status = clarification_required.
 """
 
 
@@ -535,13 +491,13 @@ def call_openai_api(
         client = OpenAI(api_key=api_key)
 
         context_prompt = f"""
-Loaded Baseline monthly summary:
+Baseline monthly summary:
 {summarize_dataframe_for_prompt(baseline_monthly)}
 
-Uploaded Drivers preview:
+Drivers preview:
 {summarize_dataframe_for_prompt(drivers_df)}
 
-Uploaded Calculation Method preview:
+Calculation Method preview:
 {summarize_dataframe_for_prompt(rules_df)}
 
 User simulation instruction:
@@ -557,8 +513,7 @@ User simulation instruction:
             ],
         )
 
-        content = response.choices[0].message.content.strip()
-        return json.loads(content)
+        return json.loads(response.choices[0].message.content.strip())
 
     except Exception:
         return fallback_parse_instruction(user_instruction)
@@ -579,7 +534,7 @@ def fallback_parse_instruction(text: str) -> Dict[str, Any]:
     if not has_effective_date:
         return {
             "status": "clarification_required",
-            "clarification_question": "What is the effective date for this simulation change? Please use YYYYMM.",
+            "clarification_question": "What is the effective date? Please use YYYYMM format.",
             "user_request": original,
             "assumptions": [],
             "effective_date": None,
@@ -587,8 +542,8 @@ def fallback_parse_instruction(text: str) -> Dict[str, Any]:
             "changes_applied": [],
             "drivers_impacted": [],
             "gl_accounts_impacted": [],
-            "fte_impact_description": "Not calculated. Effective date is missing.",
-            "labor_cost_impact_description": "Not calculated. Effective date is missing.",
+            "fte_impact_description": "Not calculated.",
+            "labor_cost_impact_description": "Not calculated.",
             "monthly_simulation_results_description": "Not calculated.",
             "executive_summary": "Clarification required before simulation can be calculated.",
             "actions": [],
@@ -629,12 +584,6 @@ def fallback_parse_instruction(text: str) -> Dict[str, Any]:
             action["cost_pct_delta"] = -abs(action["cost_pct_delta"])
 
         changes.append(f"Change Simulation cost by {action['cost_pct_delta']:+.2%} from {month}.")
-
-    elif "driver" in lower:
-        action["action_type"] = "driver_change"
-        action["driver"] = "Manual Driver"
-        action["cost_pct_delta"] = number / 100
-        changes.append(f"Change driver by {number:.2f}% from {month}.")
 
     return {
         "status": "ready_to_apply",
@@ -744,9 +693,6 @@ def apply_simulation_logic(
                 df.loc[mask, "SimulationUSD"] *= 1 + cost_pct_delta
                 df.loc[mask, "SimulationUSD"] += cost_abs_delta
 
-            elif action_type == "organization_change":
-                pass
-
     df["SimulationFTE"] = df["SimulationFTE"].clip(lower=0)
     df["SimulationUSD"] = df["SimulationUSD"].clip(lower=0)
 
@@ -773,7 +719,7 @@ def create_audit_entry(
 
 
 # ============================================================
-# Charts and summary
+# Charts, metrics, summary
 # ============================================================
 
 def render_chart(
@@ -834,6 +780,29 @@ def render_chart(
     return fig
 
 
+def render_custom_metric(
+    title: str,
+    main_value: str,
+    sub_label: str = "",
+    sub_value: str = "",
+    delta: str = "",
+    delta_positive: bool = True,
+) -> None:
+    delta_class = "positive" if delta_positive else "negative"
+
+    st.markdown(
+        f"""
+        <div class="custom-metric">
+            <div class="metric-title">{title}</div>
+            <div class="metric-main">{main_value}</div>
+            {"<div class='metric-sub'>" + sub_label + ": <b>" + sub_value + "</b></div>" if sub_label else ""}
+            {"<div class='metric-delta " + delta_class + "'>" + delta + "</div>" if delta else ""}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
     fte_impact = df["SimulationFTE"].sum() - df["BaselineFTE"].sum()
     cost_impact = df["SimulationUSD"].sum() - df["BaselineUSD"].sum()
@@ -856,11 +825,9 @@ def format_agent_response(event: Dict[str, Any]) -> str:
         return event.get("clarification_question", "Clarification required.")
 
     return (
-        f"**Executive Summary:** {event.get('executive_summary', '')}\n\n"
-        f"**Effective Date:** {event.get('effective_date', '')}\n\n"
-        f"**Changes Applied:** {', '.join(event.get('changes_applied', [])) or 'None'}\n\n"
-        f"**Drivers Impacted:** {', '.join(event.get('drivers_impacted', [])) or 'None'}\n\n"
-        f"**GL Accounts Impacted:** {', '.join(event.get('gl_accounts_impacted', [])) or 'None'}"
+        f"Executive Summary: {event.get('executive_summary', '')}\n\n"
+        f"Effective Date: {event.get('effective_date', '')}\n\n"
+        f"Changes Applied: {', '.join(event.get('changes_applied', [])) or 'None'}"
     )
 
 
@@ -928,34 +895,84 @@ def apply_css():
             border: 2px dashed #94A3B8;
         }
 
-        div[data-testid="stMetric"] {
+        .custom-metric {
             background: #111827;
             padding: 18px 16px;
             border-radius: 10px;
             border: 1px solid #1F2937;
-            min-height: 126px;
             height: 126px;
+            min-height: 126px;
             display: flex;
             flex-direction: column;
             justify-content: flex-start;
             align-items: flex-start;
+            box-sizing: border-box;
         }
 
-        div[data-testid="stMetricLabel"] {
+        .metric-title {
             color: #F9FAFB;
-            height: 24px;
+            font-size: 14px;
             line-height: 24px;
+            height: 24px;
+            font-weight: 600;
         }
 
-        div[data-testid="stMetricValue"] {
+        .metric-main {
             color: #F9FAFB;
             font-size: 28px;
             line-height: 34px;
             margin-top: 12px;
+            font-weight: 700;
         }
 
-        div[data-testid="stMetricDelta"] {
+        .metric-sub {
+            color: #CBD5E1;
+            font-size: 10px;
+            line-height: 12px;
             margin-top: 8px;
+        }
+
+        .metric-delta {
+            font-size: 14px;
+            line-height: 18px;
+            margin-top: 8px;
+            font-weight: 700;
+        }
+
+        .metric-delta.positive {
+            color: #22C55E;
+        }
+
+        .metric-delta.negative {
+            color: #EF4444;
+        }
+
+        .simulation-input-box {
+            background: #111827;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 14px;
+            margin-bottom: 14px;
+        }
+
+        .simulation-history-box {
+            background: #111827;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+
+        .simulation-history-meta {
+            color: #94A3B8;
+            font-size: 11px;
+            margin-bottom: 6px;
+        }
+
+        .simulation-history-text {
+            color: #F9FAFB;
+            font-size: 13px;
+            line-height: 1.35;
         }
 
         .summary {
@@ -1008,17 +1025,7 @@ def render_excel_help():
             Supported extra column:
             - Version
 
-            Monthly values must be in columns using **YYYYMM** format:
-            - 202601
-            - 202602
-            - 202603
-
-            Chart logic:
-            - FTE = rows where Account contains `FTE`, `Headcount`, or `HC`
-            - Cost = all non-FTE rows
-            - Baseline = rows where Version equals `Baseline`
-
-            Reuploading Data Sample replaces the baseline and clears simulation.
+            Monthly values must be in columns using **YYYYMM** format.
             """
         )
 
@@ -1036,20 +1043,11 @@ def initialize_state():
     if "simulation_events" not in st.session_state:
         st.session_state.simulation_events = []
 
+    if "simulation_requests" not in st.session_state:
+        st.session_state.simulation_requests = []
+
     if "audit_log" not in st.session_state:
         st.session_state.audit_log = []
-
-    if "chat_messages" not in st.session_state:
-        st.session_state.chat_messages = [
-            {
-                "role": "assistant",
-                "content": (
-                    "Enter scenario with effective date, e.g. "
-                    "'Hire 10 FTE effective 202604' or "
-                    "'Reduce bonus cost by 5% effective 202607'."
-                ),
-            }
-        ]
 
     if "data_sample_source" not in st.session_state:
         st.session_state.data_sample_source = "Mock data"
@@ -1151,12 +1149,6 @@ def main():
         st.caption(f"Drivers: {st.session_state.drivers_source}")
         st.caption(f"Rules: {st.session_state.rules_source}")
 
-        st.divider()
-
-        for msg in st.session_state.chat_messages:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
-
     try:
         baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
         current_simulation_df = apply_simulation_logic(
@@ -1169,13 +1161,21 @@ def main():
         return
 
     with left:
-        prompt = st.chat_input("Enter simulation instruction...")
+        st.divider()
 
-        if prompt:
-            st.session_state.chat_messages.append(
-                {"role": "user", "content": prompt}
-            )
+        st.markdown('<div class="simulation-input-box">', unsafe_allow_html=True)
+        simulation_prompt = st.text_area(
+            "Simulation input",
+            placeholder="Example: Hire 10 FTE effective 202604",
+            height=110,
+            key="simulation_input_text",
+        )
 
+        run_simulation = st.button("Run simulation", use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if run_simulation and simulation_prompt.strip():
+            prompt = simulation_prompt.strip()
             before_df = current_simulation_df.copy()
 
             parsed = call_openai_api(
@@ -1197,51 +1197,95 @@ def main():
                     create_audit_entry(parsed, before_df, after_df)
                 )
 
-            st.session_state.chat_messages.append(
+            st.session_state.simulation_requests.insert(
+                0,
                 {
-                    "role": "assistant",
-                    "content": format_agent_response(parsed),
-                }
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "request": prompt,
+                    "response": format_agent_response(parsed),
+                    "status": parsed.get("status", ""),
+                },
             )
 
+            st.session_state.simulation_input_text = ""
             st.rerun()
 
         if st.button("Reset simulation only", use_container_width=True):
             st.session_state.simulation_events = []
             st.session_state.audit_log = []
-            st.session_state.chat_messages = [
-                {
-                    "role": "assistant",
-                    "content": "Simulation reset. Baseline remains unchanged.",
-                }
-            ]
+            st.session_state.simulation_requests = []
             st.rerun()
+
+        st.subheader("Executed simulations")
+
+        if st.session_state.simulation_requests:
+            for item in st.session_state.simulation_requests:
+                st.markdown(
+                    f"""
+                    <div class="simulation-history-box">
+                        <div class="simulation-history-meta">
+                            {item["timestamp"]} | {item["status"]}
+                        </div>
+                        <div class="simulation-history-text">
+                            <b>Request:</b> {item["request"]}<br><br>
+                            <b>Result:</b> {item["response"]}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No simulations executed yet.")
 
     simulation_df = apply_simulation_logic(
         baseline_monthly,
         st.session_state.simulation_events,
     )
 
-    baseline_total_fte = simulation_df["BaselineFTE"].sum()
-    simulation_total_fte = simulation_df["SimulationFTE"].sum()
+    baseline_avg_fte = simulation_df["BaselineFTE"].mean()
+    simulation_avg_fte = simulation_df["SimulationFTE"].mean()
+
+    baseline_end_fte = simulation_df["BaselineFTE"].iloc[-1]
+    simulation_end_fte = simulation_df["SimulationFTE"].iloc[-1]
+
     baseline_total_usd = simulation_df["BaselineUSD"].sum()
     simulation_total_usd = simulation_df["SimulationUSD"].sum()
+    labor_cost_delta = simulation_total_usd - baseline_total_usd
 
     with right:
         c1, c2, c3, c4 = st.columns(4)
 
-        c1.metric("Baseline FTE", f"{baseline_total_fte:,.1f}")
-        c2.metric(
-            "Simulation FTE",
-            f"{simulation_total_fte:,.1f}",
-            delta=f"{simulation_total_fte - baseline_total_fte:+,.1f}",
-        )
-        c3.metric("Baseline Labor Cost", f"${baseline_total_usd:,.0f}")
-        c4.metric(
-            "Simulation Labor Cost",
-            f"${simulation_total_usd:,.0f}",
-            delta=f"${simulation_total_usd - baseline_total_usd:+,.0f}",
-        )
+        with c1:
+            render_custom_metric(
+                "Baseline FTE",
+                f"{baseline_avg_fte:,.1f}",
+                "FTE at end of period",
+                f"{baseline_end_fte:,.1f}",
+            )
+
+        with c2:
+            render_custom_metric(
+                "Simulation FTE",
+                f"{simulation_avg_fte:,.1f}",
+                "FTE at end of period",
+                f"{simulation_end_fte:,.1f}",
+                delta=f"{simulation_avg_fte - baseline_avg_fte:+,.1f} avg FTE",
+                delta_positive=(simulation_avg_fte - baseline_avg_fte) >= 0,
+            )
+
+        with c3:
+            render_custom_metric(
+                "Baseline Labor Cost",
+                f"${baseline_total_usd:,.0f}",
+            )
+
+        with c4:
+            render_custom_metric(
+                "Simulation Labor Cost",
+                f"${simulation_total_usd:,.0f}",
+                delta=f"${labor_cost_delta:+,.0f}",
+                delta_positive=labor_cost_delta >= 0,
+            )
 
         st.plotly_chart(
             render_chart(
