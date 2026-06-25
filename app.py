@@ -152,11 +152,7 @@ def is_yyyymm_column(col: Any) -> bool:
     return bool(re.fullmatch(r"\d{6}", clean_column_name(col)))
 
 
-def validate_required_columns(
-    df: pd.DataFrame,
-    required: List[str],
-    sheet_name: str,
-) -> None:
+def validate_required_columns(df: pd.DataFrame, required: List[str], sheet_name: str) -> None:
     existing = {str(col).strip().lower(): col for col in df.columns}
     missing = [col for col in required if col.lower() not in existing]
 
@@ -533,53 +529,67 @@ def render_chart(title, df, baseline_metric, simulation_metric, y_title, height)
     return fig
 
 
-def render_datapoint(
-    title: str,
-    main_value: str,
-    secondary_label: str = "",
-    secondary_value: str = "",
-    delta: str = "",
-    delta_positive: bool = True,
+def render_datapoints_row(
+    baseline_avg_fte: float,
+    simulation_avg_fte: float,
+    baseline_end_fte: float,
+    simulation_end_fte: float,
+    baseline_total_usd: float,
+    simulation_total_usd: float,
 ) -> None:
-    title = html.escape(str(title))
-    main_value = html.escape(str(main_value))
-    secondary_label = html.escape(str(secondary_label))
-    secondary_value = html.escape(str(secondary_value))
-    delta = html.escape(str(delta))
+    fte_delta = simulation_avg_fte - baseline_avg_fte
+    cost_delta = simulation_total_usd - baseline_total_usd
 
-    delta_class = "positive" if delta_positive else "negative"
+    fte_delta_class = "positive" if fte_delta >= 0 else "negative"
+    cost_delta_class = "positive" if cost_delta >= 0 else "negative"
 
-    secondary_html = ""
-    if secondary_label:
-        secondary_html = f"""
-            <div class="dp-secondary">
-                {secondary_label}: <b>{secondary_value}</b>
-            </div>
-        """
+    fte_arrow = "↑" if fte_delta >= 0 else "↓"
+    cost_arrow = "↑" if cost_delta >= 0 else "↓"
 
-    delta_html = ""
-    if delta:
-        delta_html = f"""
-            <div class="dp-delta {delta_class}">
-                {delta}
-            </div>
-        """
-
-    st.markdown(
-        f"""
+    html_block = f"""
+    <div class="dp-grid">
         <div class="dp-card">
-            <div class="dp-title">{title}</div>
+            <div class="dp-title">Baseline FTE</div>
             <div class="dp-main-area">
                 <div class="dp-main-stack">
-                    <div class="dp-main">{main_value}</div>
-                    {secondary_html}
+                    <div class="dp-main">{baseline_avg_fte:,.1f}</div>
+                    <div class="dp-secondary">FTE at end of period: <b>{baseline_end_fte:,.1f}</b></div>
                 </div>
-                {delta_html}
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+
+        <div class="dp-card">
+            <div class="dp-title">Simulation FTE</div>
+            <div class="dp-main-area">
+                <div class="dp-main-stack">
+                    <div class="dp-main">{simulation_avg_fte:,.1f}</div>
+                    <div class="dp-secondary">FTE at end of period: <b>{simulation_end_fte:,.1f}</b></div>
+                </div>
+                <div class="dp-delta {fte_delta_class}">{fte_arrow} {fte_delta:+,.1f}</div>
+            </div>
+        </div>
+
+        <div class="dp-card">
+            <div class="dp-title">Baseline Labor Cost</div>
+            <div class="dp-main-area">
+                <div class="dp-main-stack">
+                    <div class="dp-main">${baseline_total_usd:,.0f}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="dp-card">
+            <div class="dp-title">Simulation Labor Cost</div>
+            <div class="dp-main-area">
+                <div class="dp-main-stack">
+                    <div class="dp-main">${simulation_total_usd:,.0f}</div>
+                </div>
+                <div class="dp-delta {cost_delta_class}">{cost_arrow} ${cost_delta:+,.0f}</div>
+            </div>
+        </div>
+    </div>
+    """
+    st.markdown(html_block, unsafe_allow_html=True)
 
 
 def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
@@ -653,6 +663,13 @@ def apply_css():
         border: 2px dashed #94A3B8;
     }
 
+    .dp-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 18px;
+        margin-bottom: 5px;
+    }
+
     .dp-card {
         background: #111827;
         border: 1px solid #1F2937;
@@ -667,26 +684,25 @@ def apply_css():
         color: #F9FAFB;
         font-size: 14px;
         font-weight: 700;
-        line-height: 20px;
-        margin-bottom: 12px;
+        margin-bottom: 14px;
         white-space: nowrap;
     }
 
     .dp-main-area {
         display: flex;
-        align-items: flex-start;
+        align-items: center;
         justify-content: flex-start;
         gap: 18px;
         width: 100%;
     }
 
     .dp-main-stack {
-        display: inline-flex;
+        display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: flex-start;
         width: fit-content;
-        max-width: 75%;
+        max-width: 78%;
     }
 
     .dp-main {
@@ -703,8 +719,8 @@ def apply_css():
         font-size: 10px;
         line-height: 12px;
         margin-top: 8px;
-        white-space: nowrap;
         text-align: center;
+        white-space: nowrap;
     }
 
     .dp-delta {
@@ -715,7 +731,6 @@ def apply_css():
         white-space: nowrap;
         padding: 5px 10px;
         border-radius: 999px;
-        margin-top: 3px;
     }
 
     .dp-delta.positive {
@@ -726,10 +741,6 @@ def apply_css():
     .dp-delta.negative {
         color: #EF4444;
         background: rgba(239, 68, 68, 0.15);
-    }
-
-    .metric-row-spacer {
-        height: 5px;
     }
 
     .box {
@@ -838,10 +849,6 @@ def main():
 
     try:
         baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
-        current_simulation_df = apply_simulation_logic(
-            baseline_monthly,
-            st.session_state.simulation_events,
-        )
     except Exception as exc:
         with right:
             st.error(f"Data preparation error: {exc}")
@@ -913,45 +920,15 @@ def main():
     baseline_total_usd = simulation_df["BaselineUSD"].sum()
     simulation_total_usd = simulation_df["SimulationUSD"].sum()
 
-    fte_delta = simulation_avg_fte - baseline_avg_fte
-    labor_cost_delta = simulation_total_usd - baseline_total_usd
-
     with right:
-        c1, c2, c3, c4 = st.columns(4)
-
-        with c1:
-            render_datapoint(
-                "Baseline FTE",
-                f"{baseline_avg_fte:,.1f}",
-                "FTE at end of period",
-                f"{baseline_end_fte:,.1f}",
-            )
-
-        with c2:
-            render_datapoint(
-                "Simulation FTE",
-                f"{simulation_avg_fte:,.1f}",
-                "FTE at end of period",
-                f"{simulation_end_fte:,.1f}",
-                delta=f"↑ {fte_delta:+,.1f}" if fte_delta >= 0 else f"↓ {fte_delta:+,.1f}",
-                delta_positive=fte_delta >= 0,
-            )
-
-        with c3:
-            render_datapoint(
-                "Baseline Labor Cost",
-                f"${baseline_total_usd:,.0f}",
-            )
-
-        with c4:
-            render_datapoint(
-                "Simulation Labor Cost",
-                f"${simulation_total_usd:,.0f}",
-                delta=f"↑ ${labor_cost_delta:+,.0f}" if labor_cost_delta >= 0 else f"↓ ${labor_cost_delta:+,.0f}",
-                delta_positive=labor_cost_delta >= 0,
-            )
-
-        st.markdown('<div class="metric-row-spacer"></div>', unsafe_allow_html=True)
+        render_datapoints_row(
+            baseline_avg_fte,
+            simulation_avg_fte,
+            baseline_end_fte,
+            simulation_end_fte,
+            baseline_total_usd,
+            simulation_total_usd,
+        )
 
         st.plotly_chart(
             render_chart(
