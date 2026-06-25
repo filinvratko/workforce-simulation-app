@@ -2,6 +2,7 @@
 import os
 import json
 import re
+import html
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -138,10 +139,8 @@ def read_excel_sheet(uploaded_file, sheet_name: str) -> pd.DataFrame:
 
 def clean_column_name(col: Any) -> str:
     text = str(col).strip()
-
     if text.endswith(".0") and text[:-2].isdigit():
         text = text[:-2]
-
     return text
 
 
@@ -315,12 +314,10 @@ def extract_month_yyyymm(text: str) -> Optional[str]:
     }
 
     for month_name, month_num in month_map.items():
-        # January 2027 / Jan 2027
         match_1 = re.search(rf"\b{month_name}\s+(20\d{{2}})\b", lower)
         if match_1:
             return f"{match_1.group(1)}{month_num}"
 
-        # 2027 January / 2027 Jan
         match_2 = re.search(rf"\b(20\d{{2}})\s+{month_name}\b", lower)
         if match_2:
             return f"{match_2.group(1)}{month_num}"
@@ -400,7 +397,7 @@ You are a Workforce Planning Simulation Agent.
 Baseline is read-only. Simulation starts as copy of Baseline.
 Effective date is mandatory.
 
-Accept dates in these forms:
+Accept dates:
 - YYYYMM
 - January 2027
 - Jan 2027
@@ -536,6 +533,55 @@ def render_chart(title, df, baseline_metric, simulation_metric, y_title, height)
     return fig
 
 
+def render_datapoint(
+    title: str,
+    main_value: str,
+    secondary_label: str = "",
+    secondary_value: str = "",
+    delta: str = "",
+    delta_positive: bool = True,
+) -> None:
+    title = html.escape(str(title))
+    main_value = html.escape(str(main_value))
+    secondary_label = html.escape(str(secondary_label))
+    secondary_value = html.escape(str(secondary_value))
+    delta = html.escape(str(delta))
+
+    delta_class = "positive" if delta_positive else "negative"
+
+    secondary_html = ""
+    if secondary_label:
+        secondary_html = f"""
+            <div class="dp-secondary">
+                {secondary_label}: <b>{secondary_value}</b>
+            </div>
+        """
+
+    delta_html = ""
+    if delta:
+        delta_html = f"""
+            <div class="dp-delta {delta_class}">
+                {delta}
+            </div>
+        """
+
+    st.markdown(
+        f"""
+        <div class="dp-card">
+            <div class="dp-title">{title}</div>
+            <div class="dp-main-area">
+                <div class="dp-main-stack">
+                    <div class="dp-main">{main_value}</div>
+                    {secondary_html}
+                </div>
+                {delta_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
     fte_impact = df["SimulationFTE"].sum() - df["BaselineFTE"].sum()
     cost_impact = df["SimulationUSD"].sum() - df["BaselineUSD"].sum()
@@ -607,26 +653,79 @@ def apply_css():
         border: 2px dashed #94A3B8;
     }
 
-    div[data-testid="stMetric"] {
+    .dp-card {
         background: #111827;
         border: 1px solid #1F2937;
         border-radius: 10px;
-        padding: 18px 16px;
         height: 126px;
+        padding: 18px 22px;
+        box-sizing: border-box;
+        overflow: hidden;
     }
 
-    div[data-testid="stMetricLabel"],
-    div[data-testid="stMetricValue"] {
+    .dp-title {
         color: #F9FAFB;
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 20px;
+        margin-bottom: 12px;
+        white-space: nowrap;
     }
 
-    .fte-end {
+    .dp-main-area {
+        display: flex;
+        align-items: flex-start;
+        justify-content: flex-start;
+        gap: 18px;
+        width: 100%;
+    }
+
+    .dp-main-stack {
+        display: inline-flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        width: fit-content;
+        max-width: 75%;
+    }
+
+    .dp-main {
+        color: #F9FAFB;
+        font-size: 34px;
+        line-height: 38px;
+        font-weight: 800;
+        white-space: nowrap;
+        text-align: center;
+    }
+
+    .dp-secondary {
         color: #CBD5E1;
         font-size: 10px;
-        margin-top: -28px;
-        margin-left: 16px;
-        position: relative;
-        z-index: 2;
+        line-height: 12px;
+        margin-top: 8px;
+        white-space: nowrap;
+        text-align: center;
+    }
+
+    .dp-delta {
+        align-self: center;
+        font-size: 14px;
+        line-height: 18px;
+        font-weight: 800;
+        white-space: nowrap;
+        padding: 5px 10px;
+        border-radius: 999px;
+        margin-top: 3px;
+    }
+
+    .dp-delta.positive {
+        color: #22C55E;
+        background: rgba(34, 197, 94, 0.15);
+    }
+
+    .dp-delta.negative {
+        color: #EF4444;
+        background: rgba(239, 68, 68, 0.15);
     }
 
     .metric-row-spacer {
@@ -792,10 +891,10 @@ def main():
             st.markdown(
                 f"""
                 <div class="box">
-                    <b>{item["timestamp"]}</b><br>
-                    {item["status"]}<br><br>
-                    <b>Request:</b> {item["request"]}<br>
-                    <b>Result:</b> {item["response"]}
+                    <b>{html.escape(item["timestamp"])}</b><br>
+                    {html.escape(item["status"])}<br><br>
+                    <b>Request:</b> {html.escape(item["request"])}<br>
+                    <b>Result:</b> {html.escape(item["response"])}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -821,32 +920,35 @@ def main():
         c1, c2, c3, c4 = st.columns(4)
 
         with c1:
-            st.metric("Baseline FTE", f"{baseline_avg_fte:,.1f}")
-            st.markdown(
-                f'<div class="fte-end">FTE at end of period: <b>{baseline_end_fte:,.1f}</b></div>',
-                unsafe_allow_html=True,
+            render_datapoint(
+                "Baseline FTE",
+                f"{baseline_avg_fte:,.1f}",
+                "FTE at end of period",
+                f"{baseline_end_fte:,.1f}",
             )
 
         with c2:
-            st.metric(
+            render_datapoint(
                 "Simulation FTE",
                 f"{simulation_avg_fte:,.1f}",
-                delta=f"{fte_delta:+,.1f}",
-            )
-            st.markdown(
-                f'<div class="fte-end">FTE at end of period: <b>{simulation_end_fte:,.1f}</b></div>',
-                unsafe_allow_html=True,
+                "FTE at end of period",
+                f"{simulation_end_fte:,.1f}",
+                delta=f"↑ {fte_delta:+,.1f}" if fte_delta >= 0 else f"↓ {fte_delta:+,.1f}",
+                delta_positive=fte_delta >= 0,
             )
 
         with c3:
-            st.metric("Baseline Labor Cost", f"${baseline_total_usd:,.0f}")
+            render_datapoint(
+                "Baseline Labor Cost",
+                f"${baseline_total_usd:,.0f}",
+            )
 
         with c4:
-            st.metric(
+            render_datapoint(
                 "Simulation Labor Cost",
                 f"${simulation_total_usd:,.0f}",
-                delta=f"${labor_cost_delta:+,.0f}",
-                delta_color="normal",
+                delta=f"↑ ${labor_cost_delta:+,.0f}" if labor_cost_delta >= 0 else f"↓ ${labor_cost_delta:+,.0f}",
+                delta_positive=labor_cost_delta >= 0,
             )
 
         st.markdown('<div class="metric-row-spacer"></div>', unsafe_allow_html=True)
