@@ -67,7 +67,6 @@ def generate_mock_source_data() -> pd.DataFrame:
 
             for i, month in enumerate(months):
                 col = month.strftime("%Y%m")
-
                 if account == "FTE":
                     row[col] = 1.0
                 elif account == "Salary":
@@ -264,7 +263,7 @@ def load_calculation_rules(uploaded_file) -> pd.DataFrame:
 
 
 # ============================================================
-# Baseline replacement logic
+# Baseline replacement
 # ============================================================
 
 def replace_baseline_with_uploaded_data(uploaded_file) -> None:
@@ -275,12 +274,6 @@ def replace_baseline_with_uploaded_data(uploaded_file) -> None:
     st.session_state.simulation_events = []
     st.session_state.audit_log = []
     st.session_state.simulation_requests = []
-    st.session_state.chat_messages = [
-        {
-            "role": "assistant",
-            "content": "New Data Sample uploaded. Baseline replaced and simulation reset.",
-        }
-    ]
 
 
 def reset_to_mock_baseline() -> None:
@@ -290,12 +283,6 @@ def reset_to_mock_baseline() -> None:
     st.session_state.audit_log = []
     st.session_state.simulation_requests = []
     st.session_state.last_data_sample_upload_id = None
-    st.session_state.chat_messages = [
-        {
-            "role": "assistant",
-            "content": "Baseline reset to mock data. Simulation cleared.",
-        }
-    ]
 
 
 # ============================================================
@@ -399,7 +386,7 @@ def create_simulation_from_baseline(baseline_monthly: pd.DataFrame) -> pd.DataFr
 
 
 # ============================================================
-# Agent prompt and GPT parser
+# GPT parser
 # ============================================================
 
 def build_agent_rules_prompt() -> str:
@@ -566,12 +553,12 @@ def fallback_parse_instruction(text: str) -> Dict[str, Any]:
 
     changes = []
 
-    if any(w in lower for w in ["hire", "add fte", "increase fte", "recruit", "staff increase", "open cost center", "open site"]):
+    if any(w in lower for w in ["hire", "add fte", "increase fte", "recruit", "staff increase"]):
         action["action_type"] = "hire"
         action["fte_delta"] = abs(number)
         changes.append(f"Increase Simulation FTE by {abs(number):,.2f} from {month}.")
 
-    elif any(w in lower for w in ["layoff", "remove fte", "reduce fte", "cut fte", "workforce reduction", "staff reduction", "close cost center", "close site"]):
+    elif any(w in lower for w in ["layoff", "remove fte", "reduce fte", "cut fte", "workforce reduction"]):
         action["action_type"] = "layoff"
         action["fte_delta"] = -abs(number)
         changes.append(f"Decrease Simulation FTE by {abs(number):,.2f} from {month}.")
@@ -790,13 +777,27 @@ def render_custom_metric(
 ) -> None:
     delta_class = "positive" if delta_positive else "negative"
 
+    delta_html = (
+        f"<div class='metric-delta {delta_class}'>{delta}</div>"
+        if delta
+        else ""
+    )
+
+    sub_html = (
+        f"<div class='metric-sub'>{sub_label}: <b>{sub_value}</b></div>"
+        if sub_label
+        else ""
+    )
+
     st.markdown(
         f"""
         <div class="custom-metric">
             <div class="metric-title">{title}</div>
-            <div class="metric-main">{main_value}</div>
-            {"<div class='metric-sub'>" + sub_label + ": <b>" + sub_value + "</b></div>" if sub_label else ""}
-            {"<div class='metric-delta " + delta_class + "'>" + delta + "</div>" if delta else ""}
+            <div class="metric-main-row">
+                <div class="metric-main">{main_value}</div>
+                {delta_html}
+            </div>
+            {sub_html}
         </div>
         """,
         unsafe_allow_html=True,
@@ -825,8 +826,8 @@ def format_agent_response(event: Dict[str, Any]) -> str:
         return event.get("clarification_question", "Clarification required.")
 
     return (
-        f"Executive Summary: {event.get('executive_summary', '')}\n\n"
-        f"Effective Date: {event.get('effective_date', '')}\n\n"
+        f"Executive Summary: {event.get('executive_summary', '')}<br>"
+        f"Effective Date: {event.get('effective_date', '')}<br>"
         f"Changes Applied: {', '.join(event.get('changes_applied', [])) or 'None'}"
     )
 
@@ -895,6 +896,10 @@ def apply_css():
             border: 2px dashed #94A3B8;
         }
 
+        .metric-row-spacer {
+            height: 5px;
+        }
+
         .custom-metric {
             background: #111827;
             padding: 18px 16px;
@@ -905,7 +910,7 @@ def apply_css():
             display: flex;
             flex-direction: column;
             justify-content: flex-start;
-            align-items: flex-start;
+            align-items: stretch;
             box-sizing: border-box;
         }
 
@@ -917,12 +922,21 @@ def apply_css():
             font-weight: 600;
         }
 
+        .metric-main-row {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+            width: 100%;
+            margin-top: 12px;
+        }
+
         .metric-main {
             color: #F9FAFB;
             font-size: 28px;
             line-height: 34px;
-            margin-top: 12px;
             font-weight: 700;
+            white-space: nowrap;
         }
 
         .metric-sub {
@@ -933,10 +947,12 @@ def apply_css():
         }
 
         .metric-delta {
-            font-size: 14px;
-            line-height: 18px;
-            margin-top: 8px;
-            font-weight: 700;
+            font-size: 13px;
+            line-height: 16px;
+            font-weight: 800;
+            text-align: right;
+            white-space: nowrap;
+            margin-left: auto;
         }
 
         .metric-delta.positive {
@@ -1067,6 +1083,9 @@ def initialize_state():
     if "last_rules_upload_id" not in st.session_state:
         st.session_state.last_rules_upload_id = None
 
+    if "simulation_input_counter" not in st.session_state:
+        st.session_state.simulation_input_counter = 0
+
 
 # ============================================================
 # Main app
@@ -1164,14 +1183,18 @@ def main():
         st.divider()
 
         st.markdown('<div class="simulation-input-box">', unsafe_allow_html=True)
+
+        input_key = f"simulation_input_text_{st.session_state.simulation_input_counter}"
+
         simulation_prompt = st.text_area(
             "Simulation input",
             placeholder="Example: Hire 10 FTE effective 202604",
             height=110,
-            key="simulation_input_text",
+            key=input_key,
         )
 
         run_simulation = st.button("Run simulation", use_container_width=True)
+
         st.markdown("</div>", unsafe_allow_html=True)
 
         if run_simulation and simulation_prompt.strip():
@@ -1207,13 +1230,14 @@ def main():
                 },
             )
 
-            st.session_state.simulation_input_text = ""
+            st.session_state.simulation_input_counter += 1
             st.rerun()
 
         if st.button("Reset simulation only", use_container_width=True):
             st.session_state.simulation_events = []
             st.session_state.audit_log = []
             st.session_state.simulation_requests = []
+            st.session_state.simulation_input_counter += 1
             st.rerun()
 
         st.subheader("Executed simulations")
@@ -1252,6 +1276,8 @@ def main():
     simulation_total_usd = simulation_df["SimulationUSD"].sum()
     labor_cost_delta = simulation_total_usd - baseline_total_usd
 
+    fte_delta = simulation_avg_fte - baseline_avg_fte
+
     with right:
         c1, c2, c3, c4 = st.columns(4)
 
@@ -1269,8 +1295,8 @@ def main():
                 f"{simulation_avg_fte:,.1f}",
                 "FTE at end of period",
                 f"{simulation_end_fte:,.1f}",
-                delta=f"{simulation_avg_fte - baseline_avg_fte:+,.1f} avg FTE",
-                delta_positive=(simulation_avg_fte - baseline_avg_fte) >= 0,
+                delta=f"{fte_delta:+,.1f}",
+                delta_positive=fte_delta >= 0,
             )
 
         with c3:
@@ -1286,6 +1312,8 @@ def main():
                 delta=f"${labor_cost_delta:+,.0f}",
                 delta_positive=labor_cost_delta >= 0,
             )
+
+        st.markdown('<div class="metric-row-spacer"></div>', unsafe_allow_html=True)
 
         st.plotly_chart(
             render_chart(
