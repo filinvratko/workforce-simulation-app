@@ -967,10 +967,10 @@ def main():
             st.rerun()
 
         if st.button("Reset simulation only", use_container_width=True):
-            st.session_state.simulation_events = []
-            st.session_state.simulation_requests = []
-            st.session_state.simulation_input_counter += 1
-            st.rerun()
+    st.session_state.simulation_events = []
+    st.session_state.simulation_requests = []
+    st.session_state.simulation_input_counter += 1
+    st.rerun()
 
         st.subheader("Executed simulations")
 
