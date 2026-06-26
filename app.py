@@ -2,6 +2,7 @@
 import os
 import json
 import re
+import html
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -138,10 +139,8 @@ def read_excel_sheet(uploaded_file, sheet_name: str) -> pd.DataFrame:
 
 def clean_column_name(col: Any) -> str:
     text = str(col).strip()
-
     if text.endswith(".0") and text[:-2].isdigit():
         text = text[:-2]
-
     return text
 
 
@@ -153,11 +152,7 @@ def is_yyyymm_column(col: Any) -> bool:
     return bool(re.fullmatch(r"\d{6}", clean_column_name(col)))
 
 
-def validate_required_columns(
-    df: pd.DataFrame,
-    required: List[str],
-    sheet_name: str,
-) -> None:
+def validate_required_columns(df: pd.DataFrame, required: List[str], sheet_name: str) -> None:
     existing = {str(col).strip().lower(): col for col in df.columns}
     missing = [col for col in required if col.lower() not in existing]
 
@@ -242,7 +237,7 @@ def identify_fte_rows(df: pd.DataFrame) -> pd.Series:
     )
 
 
-def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
+def source_to_long_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
     df = normalize_columns(source_df)
     baseline_df = filter_version(df, "Baseline")
 
@@ -257,27 +252,35 @@ def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
     long_df = baseline_df.melt(
         id_vars=id_columns,
         value_vars=month_cols,
-        var_name="MonthYYYYMM",
-        value_name="Value",
+        var_name="Month",
+        value_name="BaselineValue",
     )
 
-    long_df["Month"] = pd.to_datetime(long_df["MonthYYYYMM"], format="%Y%m")
-    long_df["Value"] = pd.to_numeric(long_df["Value"], errors="coerce").fillna(0)
+    long_df["MonthDate"] = pd.to_datetime(long_df["Month"], format="%Y%m")
+    long_df["Month"] = long_df["Month"].astype(str)
+    long_df["BaselineValue"] = pd.to_numeric(
+        long_df["BaselineValue"], errors="coerce"
+    ).fillna(0)
 
+    return long_df
+
+
+def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
+    long_df = source_to_long_baseline(source_df)
     fte_mask = identify_fte_rows(long_df)
 
     fte_df = (
         long_df[fte_mask]
-        .groupby("Month", as_index=False)["Value"]
+        .groupby("MonthDate", as_index=False)["BaselineValue"]
         .sum()
-        .rename(columns={"Value": "BaselineFTE"})
+        .rename(columns={"MonthDate": "Month", "BaselineValue": "BaselineFTE"})
     )
 
     cost_df = (
         long_df[~fte_mask]
-        .groupby("Month", as_index=False)["Value"]
+        .groupby("MonthDate", as_index=False)["BaselineValue"]
         .sum()
-        .rename(columns={"Value": "BaselineUSD"})
+        .rename(columns={"MonthDate": "Month", "BaselineValue": "BaselineUSD"})
     )
 
     monthly = pd.merge(fte_df, cost_df, on="Month", how="outer").fillna(0)
@@ -315,12 +318,10 @@ def extract_month_yyyymm(text: str) -> Optional[str]:
     }
 
     for month_name, month_num in month_map.items():
-        # January 2027 / Jan 2027
         match_1 = re.search(rf"\b{month_name}\s+(20\d{{2}})\b", lower)
         if match_1:
             return f"{match_1.group(1)}{month_num}"
 
-        # 2027 January / 2027 Jan
         match_2 = re.search(rf"\b(20\d{{2}})\s+{month_name}\b", lower)
         if match_2:
             return f"{match_2.group(1)}{month_num}"
@@ -400,7 +401,7 @@ You are a Workforce Planning Simulation Agent.
 Baseline is read-only. Simulation starts as copy of Baseline.
 Effective date is mandatory.
 
-Accept dates in these forms:
+Accept dates:
 - YYYYMM
 - January 2027
 - Jan 2027
@@ -495,6 +496,61 @@ def apply_simulation_logic(
     return df
 
 
+def build_simulation_detail(
+    source_df: pd.DataFrame,
+    simulation_monthly_df: pd.DataFrame,
+) -> pd.DataFrame:
+    detail = source_to_long_baseline(source_df)
+    detail["IsFTE"] = identify_fte_rows(detail)
+
+    monthly = simulation_monthly_df.copy()
+    monthly["MonthKey"] = monthly["Month"].dt.strftime("%Y%m")
+
+    monthly["FTERatio"] = monthly.apply(
+        lambda r: r["SimulationFTE"] / r["BaselineFTE"]
+        if r["BaselineFTE"] != 0
+        else 1,
+        axis=1,
+    )
+
+    monthly["CostRatio"] = monthly.apply(
+        lambda r: r["SimulationUSD"] / r["BaselineUSD"]
+        if r["BaselineUSD"] != 0
+        else 1,
+        axis=1,
+    )
+
+    ratios = monthly[["MonthKey", "FTERatio", "CostRatio"]]
+
+    detail = detail.merge(
+        ratios,
+        left_on="Month",
+        right_on="MonthKey",
+        how="left",
+    )
+
+    detail["SimulationValue"] = detail.apply(
+        lambda r: r["BaselineValue"] * r["FTERatio"]
+        if r["IsFTE"]
+        else r["BaselineValue"] * r["CostRatio"],
+        axis=1,
+    )
+
+    detail["Delta"] = detail["SimulationValue"] - detail["BaselineValue"]
+
+    ordered_cols = DATA_SAMPLE_ROW_COLUMNS + [
+        "Month",
+        "BaselineValue",
+        "SimulationValue",
+        "Delta",
+    ]
+
+    result = detail[ordered_cols].copy()
+    result["Month"] = result["Month"].astype(str)
+
+    return result.sort_values(DATA_SAMPLE_ROW_COLUMNS + ["Month"])
+
+
 def render_chart(title, df, baseline_metric, simulation_metric, y_title, height):
     fig = go.Figure()
 
@@ -534,6 +590,69 @@ def render_chart(title, df, baseline_metric, simulation_metric, y_title, height)
     fig.update_xaxes(showgrid=False, tickangle=-45)
 
     return fig
+
+
+def render_datapoints_row(
+    baseline_avg_fte: float,
+    simulation_avg_fte: float,
+    baseline_end_fte: float,
+    simulation_end_fte: float,
+    baseline_total_usd: float,
+    simulation_total_usd: float,
+) -> None:
+    fte_delta = simulation_avg_fte - baseline_avg_fte
+    cost_delta = simulation_total_usd - baseline_total_usd
+
+    fte_delta_class = "positive" if fte_delta >= 0 else "negative"
+    cost_delta_class = "positive" if cost_delta >= 0 else "negative"
+
+    fte_arrow = "↑" if fte_delta >= 0 else "↓"
+    cost_arrow = "↑" if cost_delta >= 0 else "↓"
+
+    html_block = f"""
+    <div class="dp-grid">
+        <div class="dp-card">
+            <div class="dp-title">Baseline FTE</div>
+            <div class="dp-main-area">
+                <div class="dp-main-stack">
+                    <div class="dp-main">{baseline_avg_fte:,.1f}</div>
+                    <div class="dp-secondary">FTE at end of period: <b>{baseline_end_fte:,.1f}</b></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="dp-card">
+            <div class="dp-title">Simulation FTE</div>
+            <div class="dp-main-area">
+                <div class="dp-main-stack">
+                    <div class="dp-main">{simulation_avg_fte:,.1f}</div>
+                    <div class="dp-secondary">FTE at end of period: <b>{simulation_end_fte:,.1f}</b></div>
+                </div>
+                <div class="dp-delta {fte_delta_class}">{fte_arrow} {fte_delta:+,.1f}</div>
+            </div>
+        </div>
+
+        <div class="dp-card">
+            <div class="dp-title">Baseline Labor Cost</div>
+            <div class="dp-main-area">
+                <div class="dp-main-stack">
+                    <div class="dp-main">${baseline_total_usd:,.0f}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="dp-card">
+            <div class="dp-title">Simulation Labor Cost</div>
+            <div class="dp-main-area">
+                <div class="dp-main-stack">
+                    <div class="dp-main">${simulation_total_usd:,.0f}</div>
+                </div>
+                <div class="dp-delta {cost_delta_class}">{cost_arrow} ${cost_delta:+,.0f}</div>
+            </div>
+        </div>
+    </div>
+    """
+    st.markdown(html_block, unsafe_allow_html=True)
 
 
 def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
@@ -607,30 +726,84 @@ def apply_css():
         border: 2px dashed #94A3B8;
     }
 
-    div[data-testid="stMetric"] {
+    .dp-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 18px;
+        margin-bottom: 5px;
+    }
+
+    .dp-card {
         background: #111827;
         border: 1px solid #1F2937;
         border-radius: 10px;
-        padding: 18px 16px;
         height: 126px;
+        padding: 18px 22px;
+        box-sizing: border-box;
+        overflow: hidden;
     }
 
-    div[data-testid="stMetricLabel"],
-    div[data-testid="stMetricValue"] {
+    .dp-title {
         color: #F9FAFB;
+        font-size: 14px;
+        font-weight: 700;
+        margin-bottom: 14px;
+        white-space: nowrap;
     }
 
-    .fte-end {
+    .dp-main-area {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 18px;
+        width: 100%;
+    }
+
+    .dp-main-stack {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        width: fit-content;
+        max-width: 78%;
+    }
+
+    .dp-main {
+        color: #F9FAFB;
+        font-size: 34px;
+        line-height: 38px;
+        font-weight: 800;
+        white-space: nowrap;
+        text-align: center;
+    }
+
+    .dp-secondary {
         color: #CBD5E1;
         font-size: 10px;
-        margin-top: -28px;
-        margin-left: 16px;
-        position: relative;
-        z-index: 2;
+        line-height: 12px;
+        margin-top: 8px;
+        text-align: center;
+        white-space: nowrap;
     }
 
-    .metric-row-spacer {
-        height: 5px;
+    .dp-delta {
+        align-self: center;
+        font-size: 14px;
+        line-height: 18px;
+        font-weight: 800;
+        white-space: nowrap;
+        padding: 5px 10px;
+        border-radius: 999px;
+    }
+
+    .dp-delta.positive {
+        color: #22C55E;
+        background: rgba(34, 197, 94, 0.15);
+    }
+
+    .dp-delta.negative {
+        color: #EF4444;
+        background: rgba(239, 68, 68, 0.15);
     }
 
     .box {
@@ -739,10 +912,6 @@ def main():
 
     try:
         baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
-        current_simulation_df = apply_simulation_logic(
-            baseline_monthly,
-            st.session_state.simulation_events,
-        )
     except Exception as exc:
         with right:
             st.error(f"Data preparation error: {exc}")
@@ -792,10 +961,10 @@ def main():
             st.markdown(
                 f"""
                 <div class="box">
-                    <b>{item["timestamp"]}</b><br>
-                    {item["status"]}<br><br>
-                    <b>Request:</b> {item["request"]}<br>
-                    <b>Result:</b> {item["response"]}
+                    <b>{html.escape(item["timestamp"])}</b><br>
+                    {html.escape(item["status"])}<br><br>
+                    <b>Request:</b> {html.escape(item["request"])}<br>
+                    <b>Result:</b> {html.escape(item["response"])}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -806,6 +975,11 @@ def main():
         st.session_state.simulation_events,
     )
 
+    simulation_detail_df = build_simulation_detail(
+        st.session_state.data_sample_df,
+        simulation_df,
+    )
+
     baseline_avg_fte = simulation_df["BaselineFTE"].mean()
     simulation_avg_fte = simulation_df["SimulationFTE"].mean()
     baseline_end_fte = simulation_df["BaselineFTE"].iloc[-1]
@@ -814,42 +988,15 @@ def main():
     baseline_total_usd = simulation_df["BaselineUSD"].sum()
     simulation_total_usd = simulation_df["SimulationUSD"].sum()
 
-    fte_delta = simulation_avg_fte - baseline_avg_fte
-    labor_cost_delta = simulation_total_usd - baseline_total_usd
-
     with right:
-        c1, c2, c3, c4 = st.columns(4)
-
-        with c1:
-            st.metric("Baseline FTE", f"{baseline_avg_fte:,.1f}")
-            st.markdown(
-                f'<div class="fte-end">FTE at end of period: <b>{baseline_end_fte:,.1f}</b></div>',
-                unsafe_allow_html=True,
-            )
-
-        with c2:
-            st.metric(
-                "Simulation FTE",
-                f"{simulation_avg_fte:,.1f}",
-                delta=f"{fte_delta:+,.1f}",
-            )
-            st.markdown(
-                f'<div class="fte-end">FTE at end of period: <b>{simulation_end_fte:,.1f}</b></div>',
-                unsafe_allow_html=True,
-            )
-
-        with c3:
-            st.metric("Baseline Labor Cost", f"${baseline_total_usd:,.0f}")
-
-        with c4:
-            st.metric(
-                "Simulation Labor Cost",
-                f"${simulation_total_usd:,.0f}",
-                delta=f"${labor_cost_delta:+,.0f}",
-                delta_color="normal",
-            )
-
-        st.markdown('<div class="metric-row-spacer"></div>', unsafe_allow_html=True)
+        render_datapoints_row(
+            baseline_avg_fte,
+            simulation_avg_fte,
+            baseline_end_fte,
+            simulation_end_fte,
+            baseline_total_usd,
+            simulation_total_usd,
+        )
 
         st.plotly_chart(
             render_chart(
@@ -883,8 +1030,8 @@ def main():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        with st.expander("Debug loaded monthly data"):
-            st.dataframe(simulation_df, use_container_width=True)
+        with st.expander("Simulation Detail"):
+            st.dataframe(simulation_detail_df, use_container_width=True)
 
         with st.expander("Preview loaded source files"):
             tab1, tab2, tab3 = st.tabs(["FTE & Costs", "SAC Driver", "NDC Rules"])
