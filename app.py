@@ -52,6 +52,7 @@ def generate_mock_source_data() -> pd.DataFrame:
     for cc in cost_centers:
         for employee_id in range(1, 4):
             employee = f"{cc}_E{employee_id:03d}"
+
             for account in accounts:
                 row = {
                     "Company Code": "IL01",
@@ -66,6 +67,7 @@ def generate_mock_source_data() -> pd.DataFrame:
 
                 for i, month in enumerate(months):
                     col = month.strftime("%Y%m")
+
                     if account == "FTE":
                         row[col] = 1.0
                     elif account == "Salary":
@@ -133,15 +135,19 @@ def generate_mock_rules() -> pd.DataFrame:
 
 def read_excel_sheet(uploaded_file, sheet_name: str) -> pd.DataFrame:
     sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl")
+
     if sheet_name not in sheets:
         raise ValueError(f"Missing required sheet: {sheet_name}")
+
     return sheets[sheet_name].copy()
 
 
 def clean_column_name(col: Any) -> str:
     text = str(col).strip()
+
     if text.endswith(".0") and text[:-2].isdigit():
         text = text[:-2]
+
     return text
 
 
@@ -153,11 +159,18 @@ def is_yyyymm_column(col: Any) -> bool:
     return bool(re.fullmatch(r"\d{6}", clean_column_name(col)))
 
 
-def validate_required_columns(df: pd.DataFrame, required: List[str], sheet_name: str) -> None:
+def validate_required_columns(
+    df: pd.DataFrame,
+    required: List[str],
+    sheet_name: str,
+) -> None:
     existing = {str(col).strip().lower(): col for col in df.columns}
     missing = [col for col in required if col.lower() not in existing]
+
     if missing:
-        raise ValueError(f"Sheet '{sheet_name}' is missing columns: {', '.join(missing)}")
+        raise ValueError(
+            f"Sheet '{sheet_name}' is missing columns: {', '.join(missing)}"
+        )
 
 
 def get_actual_column(df: pd.DataFrame, expected_name: str) -> Optional[str]:
@@ -169,11 +182,14 @@ def get_actual_column(df: pd.DataFrame, expected_name: str) -> Optional[str]:
 
 def get_month_columns(df: pd.DataFrame, excluded: List[str]) -> List[str]:
     excluded_lower = [x.lower() for x in excluded]
+
     month_cols = [
         col
         for col in df.columns
-        if str(col).strip().lower() not in excluded_lower and is_yyyymm_column(col)
+        if str(col).strip().lower() not in excluded_lower
+        and is_yyyymm_column(col)
     ]
+
     return sorted(month_cols, key=lambda x: pd.to_datetime(str(x), format="%Y%m"))
 
 
@@ -185,6 +201,7 @@ def load_data_sample(uploaded_file) -> pd.DataFrame:
         df["Version"] = "Baseline"
 
     month_cols = get_month_columns(df, DATA_SAMPLE_ROW_COLUMNS + ["Version"])
+
     if not month_cols:
         raise ValueError("No YYYYMM month columns found in Data Sample.")
 
@@ -208,6 +225,7 @@ def load_calculation_rules(uploaded_file) -> pd.DataFrame:
 
 def filter_version(df: pd.DataFrame, version: str) -> pd.DataFrame:
     version_col = get_actual_column(df, "Version")
+
     if version_col is None:
         return df.copy()
 
@@ -220,10 +238,12 @@ def filter_version(df: pd.DataFrame, version: str) -> pd.DataFrame:
 
 def identify_fte_rows(df: pd.DataFrame) -> pd.Series:
     account_col = get_actual_column(df, "Account")
+
     if account_col is None:
         return pd.Series(False, index=df.index)
 
     txt = df[account_col].astype(str).str.lower().str.strip()
+
     return (
         txt.str.contains("fte", na=False)
         | txt.str.contains("headcount", na=False)
@@ -256,8 +276,6 @@ def source_to_long_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
         long_df["BaselineValue"], errors="coerce"
     ).fillna(0)
 
-    # Reset behavior: every app run starts SimulationValue as BaselineValue.
-    # Simulation events are then applied on top.
     long_df["SimulationValue"] = long_df["BaselineValue"]
     long_df["IsFTE"] = identify_fte_rows(long_df)
 
@@ -317,9 +335,15 @@ def extract_scope(text: str) -> Dict[str, Optional[str]]:
     for dimension, pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            return {"scope_dimension": dimension, "scope_value": match.group(1)}
+            return {
+                "scope_dimension": dimension,
+                "scope_value": match.group(1),
+            }
 
-    return {"scope_dimension": None, "scope_value": None}
+    return {
+        "scope_dimension": None,
+        "scope_value": None,
+    }
 
 
 def fallback_parse_instruction(text: str) -> Dict[str, Any]:
@@ -349,17 +373,24 @@ def fallback_parse_instruction(text: str) -> Dict[str, Any]:
         "scope_value": scope["scope_value"],
     }
 
-    if any(w in lower for w in ["hire", "add fte", "increase fte", "recruit", "staff increase"]):
+    if any(
+        w in lower
+        for w in ["hire", "add fte", "increase fte", "recruit", "staff increase"]
+    ):
         action["action_type"] = "hire"
         action["fte_delta"] = abs(number)
 
-    elif any(w in lower for w in ["layoff", "remove fte", "reduce fte", "cut fte", "workforce reduction"]):
+    elif any(
+        w in lower
+        for w in ["layoff", "remove fte", "reduce fte", "cut fte", "workforce reduction"]
+    ):
         action["action_type"] = "layoff"
         action["fte_delta"] = -abs(number)
 
     else:
         action["action_type"] = "cost_change"
         action["cost_pct_delta"] = abs(number) / 100
+
         if any(w in lower for w in ["reduce", "decrease", "cut", "lower", "reduction"]):
             action["cost_pct_delta"] = -abs(action["cost_pct_delta"])
 
@@ -393,8 +424,13 @@ def call_openai_api(prompt: str) -> Dict[str, Any]:
 
         system_prompt = """
 You are a Workforce Planning Simulation Agent.
-Baseline is read-only. Simulation starts as copy of Baseline.
-Effective date is mandatory.
+
+Rules:
+- Baseline is read-only.
+- Simulation starts as copy of Baseline.
+- Effective date is mandatory.
+- Recognize dates like YYYYMM, January 2027, Jan 2027, 2027 January.
+- Recognize scoped dimensions such as Cost Center CC_001.
 
 Return JSON only:
 {
@@ -472,22 +508,21 @@ def apply_detail_simulation_logic(
 
         for action in event.get("actions", []):
             effective_month = str(action.get("effective_month", ""))
+
             if not re.fullmatch(r"\d{6}", effective_month):
                 continue
 
             date_mask = detail["Month"] >= effective_month
             scope_mask = build_scope_mask(detail, action)
+            target_mask = date_mask & scope_mask
 
             action_type = action.get("action_type")
             fte_delta = float(action.get("fte_delta", 0) or 0)
             cost_pct_delta = float(action.get("cost_pct_delta", 0) or 0)
             cost_abs_delta = float(action.get("cost_abs_delta", 0) or 0)
 
-            target_mask = date_mask & scope_mask
-
             if action_type in ["hire", "layoff"]:
                 fte_mask = target_mask & detail["IsFTE"]
-
                 rows_per_month = detail.loc[fte_mask].groupby("Month").size().to_dict()
 
                 for month, row_count in rows_per_month.items():
@@ -501,11 +536,15 @@ def apply_detail_simulation_logic(
                 if affected_fte != 0:
                     cost_per_fte = affected_cost / affected_fte
                     cost_delta_total = fte_delta * cost_per_fte
-                    cost_rows_per_month = detail.loc[cost_mask].groupby("Month").size().to_dict()
+                    cost_rows_per_month = (
+                        detail.loc[cost_mask].groupby("Month").size().to_dict()
+                    )
 
                     for month, row_count in cost_rows_per_month.items():
                         month_mask = cost_mask & (detail["Month"] == month)
-                        detail.loc[month_mask, "SimulationValue"] += cost_delta_total / row_count
+                        detail.loc[month_mask, "SimulationValue"] += (
+                            cost_delta_total / row_count
+                        )
 
             elif action_type == "cost_change":
                 cost_mask = target_mask & ~detail["IsFTE"]
@@ -555,14 +594,37 @@ def build_simulation_detail(detail_df: pd.DataFrame) -> pd.DataFrame:
 
     result = detail_df[ordered_cols].copy()
     result["Month"] = result["Month"].astype(str)
+
     return result.sort_values(DATA_SAMPLE_ROW_COLUMNS + ["Month"])
+
+
+def reset_simulation_only() -> None:
+    st.session_state.simulation_events = []
+    st.session_state.simulation_requests = []
+    st.session_state.simulation_input_counter += 1
+    st.session_state.force_reset_simulation = True
 
 
 def render_chart(title, df, baseline_metric, simulation_metric, y_title, height):
     fig = go.Figure()
 
-    fig.add_trace(go.Bar(x=df["MonthLabel"], y=df[baseline_metric], name="Baseline", marker_color="#2563EB"))
-    fig.add_trace(go.Bar(x=df["MonthLabel"], y=df[simulation_metric], name="Simulation", marker_color="#F97316"))
+    fig.add_trace(
+        go.Bar(
+            x=df["MonthLabel"],
+            y=df[baseline_metric],
+            name="Baseline",
+            marker_color="#2563EB",
+        )
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=df["MonthLabel"],
+            y=df[simulation_metric],
+            name="Simulation",
+            marker_color="#F97316",
+        )
+    )
 
     fig.update_layout(
         title=title,
@@ -572,7 +634,13 @@ def render_chart(title, df, baseline_metric, simulation_metric, y_title, height)
         paper_bgcolor="#111827",
         font=dict(color="#F9FAFB"),
         margin=dict(l=30, r=30, t=62, b=90),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+        ),
         yaxis_title=y_title,
     )
 
@@ -836,6 +904,7 @@ def initialize_state():
         "last_drivers_upload_id": None,
         "last_rules_upload_id": None,
         "simulation_input_counter": 0,
+        "force_reset_simulation": False,
     }
 
     for key, value in defaults.items():
@@ -854,13 +923,16 @@ def main():
         st.subheader("GPT Simulation")
 
         data_file = st.file_uploader("Upload / Reupload Data Sample", type=["xlsx"])
+
         if data_file is not None:
             upload_id = f"{data_file.name}_{data_file.size}"
+
             if upload_id != st.session_state.last_data_sample_upload_id:
                 st.session_state.data_sample_df = load_data_sample(data_file)
                 st.session_state.data_sample_source = data_file.name
                 st.session_state.simulation_events = []
                 st.session_state.simulation_requests = []
+                st.session_state.force_reset_simulation = True
                 st.session_state.last_data_sample_upload_id = upload_id
                 st.rerun()
 
@@ -869,11 +941,14 @@ def main():
             st.session_state.data_sample_source = "Mock data"
             st.session_state.simulation_events = []
             st.session_state.simulation_requests = []
+            st.session_state.force_reset_simulation = True
             st.rerun()
 
         drivers_file = st.file_uploader("Upload Drivers", type=["xlsx"])
+
         if drivers_file is not None:
             upload_id = f"{drivers_file.name}_{drivers_file.size}"
+
             if upload_id != st.session_state.last_drivers_upload_id:
                 st.session_state.drivers_df = load_drivers(drivers_file)
                 st.session_state.drivers_source = drivers_file.name
@@ -881,8 +956,10 @@ def main():
                 st.rerun()
 
         calc_file = st.file_uploader("Upload Calculation_method", type=["xlsx"])
+
         if calc_file is not None:
             upload_id = f"{calc_file.name}_{calc_file.size}"
+
             if upload_id != st.session_state.last_rules_upload_id:
                 st.session_state.rules_df = load_calculation_rules(calc_file)
                 st.session_state.rules_source = calc_file.name
@@ -913,22 +990,26 @@ def main():
 
             if parsed.get("status") == "ready_to_apply":
                 st.session_state.simulation_events.append(parsed)
+                st.session_state.force_reset_simulation = False
 
-            st.session_state.simulation_requests.insert(0, {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "request": prompt,
-                "response": parsed.get("executive_summary", ""),
-                "status": parsed.get("status", ""),
-            })
+            st.session_state.simulation_requests.insert(
+                0,
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "request": prompt,
+                    "response": parsed.get("executive_summary", ""),
+                    "status": parsed.get("status", ""),
+                },
+            )
 
             st.session_state.simulation_input_counter += 1
             st.rerun()
 
-        if st.button("Reset simulation only", use_container_width=True):
-            st.session_state.simulation_events = []
-            st.session_state.simulation_requests = []
-            st.session_state.simulation_input_counter += 1
-            st.rerun()
+        st.button(
+            "Reset simulation only",
+            use_container_width=True,
+            on_click=reset_simulation_only,
+        )
 
         st.subheader("Executed simulations")
 
@@ -946,12 +1027,23 @@ def main():
             )
 
     try:
+        active_events = (
+            []
+            if st.session_state.force_reset_simulation
+            else st.session_state.simulation_events
+        )
+
         detail_df = apply_detail_simulation_logic(
             st.session_state.data_sample_df,
-            st.session_state.simulation_events,
+            active_events,
         )
+
         simulation_df = aggregate_monthly_from_detail(detail_df)
         simulation_detail_df = build_simulation_detail(detail_df)
+
+        if st.session_state.force_reset_simulation:
+            st.session_state.force_reset_simulation = False
+
     except Exception as exc:
         with right:
             st.error(f"Data preparation error: {exc}")
@@ -1002,7 +1094,7 @@ def main():
         st.markdown('<div class="summary">', unsafe_allow_html=True)
         st.subheader("Simulation Impact Summary")
 
-        for item in build_summary(simulation_df, st.session_state.simulation_events):
+        for item in build_summary(simulation_df, active_events):
             st.markdown(f"- {item}")
 
         st.markdown("</div>", unsafe_allow_html=True)
