@@ -46,36 +46,38 @@ CALC_RULES_REQUIRED_COLUMNS = [
 def generate_mock_source_data() -> pd.DataFrame:
     months = pd.date_range("2026-01-01", periods=36, freq="MS")
     accounts = ["FTE", "Salary", "Bonus", "Benefits", "Payroll Tax"]
-    employees = ["E001", "E002", "E003", "E004", "E005"]
+    cost_centers = ["CC_001", "CC_002", "CC_003"]
     rows = []
 
-    for employee in employees:
-        for account in accounts:
-            row = {
-                "Company Code": "IL01",
-                "Cost Center": "CC100",
-                "Profit Center": "PC01",
-                "Business Area": "Operations",
-                "Segment": "Manufacturing",
-                "Employee": employee,
-                "Account": account,
-                "Version": "Baseline",
-            }
+    for cc in cost_centers:
+        for employee_id in range(1, 4):
+            employee = f"{cc}_E{employee_id:03d}"
+            for account in accounts:
+                row = {
+                    "Company Code": "IL01",
+                    "Cost Center": cc,
+                    "Profit Center": "PC01",
+                    "Business Area": "Operations",
+                    "Segment": "Manufacturing",
+                    "Employee": employee,
+                    "Account": account,
+                    "Version": "Baseline",
+                }
 
-            for i, month in enumerate(months):
-                col = month.strftime("%Y%m")
-                if account == "FTE":
-                    row[col] = 1.0
-                elif account == "Salary":
-                    row[col] = 5200 + i * 50
-                elif account == "Bonus":
-                    row[col] = 400
-                elif account == "Benefits":
-                    row[col] = 850
-                else:
-                    row[col] = 620
+                for i, month in enumerate(months):
+                    col = month.strftime("%Y%m")
+                    if account == "FTE":
+                        row[col] = 1.0
+                    elif account == "Salary":
+                        row[col] = 5200 + i * 50
+                    elif account == "Bonus":
+                        row[col] = 400
+                    elif account == "Benefits":
+                        row[col] = 850
+                    else:
+                        row[col] = 620
 
-            rows.append(row)
+                rows.append(row)
 
     return pd.DataFrame(rows)
 
@@ -131,10 +133,8 @@ def generate_mock_rules() -> pd.DataFrame:
 
 def read_excel_sheet(uploaded_file, sheet_name: str) -> pd.DataFrame:
     sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl")
-
     if sheet_name not in sheets:
         raise ValueError(f"Missing required sheet: {sheet_name}")
-
     return sheets[sheet_name].copy()
 
 
@@ -156,7 +156,6 @@ def is_yyyymm_column(col: Any) -> bool:
 def validate_required_columns(df: pd.DataFrame, required: List[str], sheet_name: str) -> None:
     existing = {str(col).strip().lower(): col for col in df.columns}
     missing = [col for col in required if col.lower() not in existing]
-
     if missing:
         raise ValueError(f"Sheet '{sheet_name}' is missing columns: {', '.join(missing)}")
 
@@ -186,7 +185,6 @@ def load_data_sample(uploaded_file) -> pd.DataFrame:
         df["Version"] = "Baseline"
 
     month_cols = get_month_columns(df, DATA_SAMPLE_ROW_COLUMNS + ["Version"])
-
     if not month_cols:
         raise ValueError("No YYYYMM month columns found in Data Sample.")
 
@@ -210,7 +208,6 @@ def load_calculation_rules(uploaded_file) -> pd.DataFrame:
 
 def filter_version(df: pd.DataFrame, version: str) -> pd.DataFrame:
     version_col = get_actual_column(df, "Version")
-
     if version_col is None:
         return df.copy()
 
@@ -223,12 +220,10 @@ def filter_version(df: pd.DataFrame, version: str) -> pd.DataFrame:
 
 def identify_fte_rows(df: pd.DataFrame) -> pd.Series:
     account_col = get_actual_column(df, "Account")
-
     if account_col is None:
         return pd.Series(False, index=df.index)
 
     txt = df[account_col].astype(str).str.lower().str.strip()
-
     return (
         txt.str.contains("fte", na=False)
         | txt.str.contains("headcount", na=False)
@@ -255,38 +250,15 @@ def source_to_long_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
         value_name="BaselineValue",
     )
 
-    long_df["MonthDate"] = pd.to_datetime(long_df["Month"], format="%Y%m")
     long_df["Month"] = long_df["Month"].astype(str)
+    long_df["MonthDate"] = pd.to_datetime(long_df["Month"], format="%Y%m")
     long_df["BaselineValue"] = pd.to_numeric(
         long_df["BaselineValue"], errors="coerce"
     ).fillna(0)
+    long_df["SimulationValue"] = long_df["BaselineValue"]
+    long_df["IsFTE"] = identify_fte_rows(long_df)
 
     return long_df
-
-
-def source_to_monthly_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
-    long_df = source_to_long_baseline(source_df)
-    fte_mask = identify_fte_rows(long_df)
-
-    fte_df = (
-        long_df[fte_mask]
-        .groupby("MonthDate", as_index=False)["BaselineValue"]
-        .sum()
-        .rename(columns={"MonthDate": "Month", "BaselineValue": "BaselineFTE"})
-    )
-
-    cost_df = (
-        long_df[~fte_mask]
-        .groupby("MonthDate", as_index=False)["BaselineValue"]
-        .sum()
-        .rename(columns={"MonthDate": "Month", "BaselineValue": "BaselineUSD"})
-    )
-
-    monthly = pd.merge(fte_df, cost_df, on="Month", how="outer").fillna(0)
-    monthly = monthly.sort_values("Month")
-    monthly["MonthLabel"] = monthly["Month"].dt.strftime("%b %Y")
-
-    return monthly
 
 
 def extract_first_number(text: str) -> float:
@@ -328,9 +300,36 @@ def extract_month_yyyymm(text: str) -> Optional[str]:
     return None
 
 
+def extract_scope(text: str) -> Dict[str, Optional[str]]:
+    patterns = [
+        ("Cost Center", r"cost\s*center\s+([A-Za-z0-9_\-]+)"),
+        ("Company Code", r"company\s*code\s+([A-Za-z0-9_\-]+)"),
+        ("Profit Center", r"profit\s*center\s+([A-Za-z0-9_\-]+)"),
+        ("Business Area", r"business\s*area\s+([A-Za-z0-9_\-]+)"),
+        ("Segment", r"segment\s+([A-Za-z0-9_\-]+)"),
+        ("Employee", r"employee\s+([A-Za-z0-9_\-]+)"),
+        ("Account", r"account\s+([A-Za-z0-9_\-]+)"),
+    ]
+
+    lower = text.lower()
+    for dimension, pattern in patterns:
+        match = re.search(pattern, lower, re.IGNORECASE)
+        if match:
+            return {
+                "scope_dimension": dimension,
+                "scope_value": match.group(1),
+            }
+
+    return {
+        "scope_dimension": None,
+        "scope_value": None,
+    }
+
+
 def fallback_parse_instruction(text: str) -> Dict[str, Any]:
     lower = text.lower()
     month = extract_month_yyyymm(lower)
+    scope = extract_scope(text)
 
     if not month:
         return {
@@ -350,6 +349,8 @@ def fallback_parse_instruction(text: str) -> Dict[str, Any]:
         "cost_abs_delta": 0,
         "effective_month": month,
         "end_month": None,
+        "scope_dimension": scope["scope_dimension"],
+        "scope_value": scope["scope_value"],
     }
 
     if any(w in lower for w in ["hire", "add fte", "increase fte", "recruit", "staff increase"]):
@@ -363,7 +364,6 @@ def fallback_parse_instruction(text: str) -> Dict[str, Any]:
     else:
         action["action_type"] = "cost_change"
         action["cost_pct_delta"] = abs(number) / 100
-
         if any(w in lower for w in ["reduce", "decrease", "cut", "lower", "reduction"]):
             action["cost_pct_delta"] = -abs(action["cost_pct_delta"])
 
@@ -400,13 +400,6 @@ You are a Workforce Planning Simulation Agent.
 Baseline is read-only. Simulation starts as copy of Baseline.
 Effective date is mandatory.
 
-Accept dates:
-- YYYYMM
-- January 2027
-- Jan 2027
-- 2027 January
-- 2027 Jan
-
 Return JSON only:
 {
   "status": "ready_to_apply" or "clarification_required",
@@ -422,7 +415,9 @@ Return JSON only:
       "cost_pct_delta": number,
       "cost_abs_delta": number,
       "effective_month": "YYYYMM",
-      "end_month": null
+      "end_month": null,
+      "scope_dimension": "Cost Center" | "Company Code" | "Profit Center" | "Business Area" | "Segment" | "Employee" | "Account" | null,
+      "scope_value": string or null
     }
   ]
 }
@@ -437,106 +432,133 @@ Return JSON only:
             ],
         )
 
-        return json.loads(response.choices[0].message.content.strip())
+        parsed = json.loads(response.choices[0].message.content.strip())
+
+        for action in parsed.get("actions", []):
+            if not action.get("scope_dimension"):
+                fallback_scope = extract_scope(prompt)
+                action["scope_dimension"] = fallback_scope["scope_dimension"]
+                action["scope_value"] = fallback_scope["scope_value"]
+
+        return parsed
 
     except Exception:
         return fallback_parse_instruction(prompt)
 
 
-def create_simulation_from_baseline(baseline_df: pd.DataFrame) -> pd.DataFrame:
-    df = baseline_df.copy()
-    df["SimulationFTE"] = df["BaselineFTE"]
-    df["SimulationUSD"] = df["BaselineUSD"]
-    return df
+def build_scope_mask(detail_df: pd.DataFrame, action: Dict[str, Any]) -> pd.Series:
+    mask = pd.Series(True, index=detail_df.index)
+
+    scope_dimension = action.get("scope_dimension")
+    scope_value = action.get("scope_value")
+
+    if scope_dimension and scope_value and scope_dimension in detail_df.columns:
+        mask &= (
+            detail_df[scope_dimension]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            == str(scope_value).strip().lower()
+        )
+
+    return mask
 
 
-def apply_simulation_logic(
-    baseline_monthly: pd.DataFrame,
+def apply_detail_simulation_logic(
+    source_df: pd.DataFrame,
     events: List[Dict[str, Any]],
 ) -> pd.DataFrame:
-    df = create_simulation_from_baseline(baseline_monthly)
-
-    avg_cost_per_fte = (
-        df["BaselineUSD"].sum() / df["BaselineFTE"].sum()
-        if df["BaselineFTE"].sum() else 0
-    )
+    detail = source_to_long_baseline(source_df)
 
     for event in events:
         if event.get("status") != "ready_to_apply":
             continue
 
         for action in event.get("actions", []):
-            effective_month = pd.to_datetime(
-                str(action.get("effective_month")),
-                format="%Y%m",
-                errors="coerce",
-            )
-
-            if pd.isna(effective_month):
+            effective_month = str(action.get("effective_month", ""))
+            if not re.fullmatch(r"\d{6}", effective_month):
                 continue
 
-            mask = df["Month"] >= effective_month
+            date_mask = detail["Month"] >= effective_month
+            scope_mask = build_scope_mask(detail, action)
 
             action_type = action.get("action_type")
             fte_delta = float(action.get("fte_delta", 0) or 0)
             cost_pct_delta = float(action.get("cost_pct_delta", 0) or 0)
             cost_abs_delta = float(action.get("cost_abs_delta", 0) or 0)
 
+            target_mask = date_mask & scope_mask
+
             if action_type in ["hire", "layoff"]:
-                df.loc[mask, "SimulationFTE"] += fte_delta
-                df.loc[mask, "SimulationUSD"] += fte_delta * avg_cost_per_fte
-            else:
-                df.loc[mask, "SimulationUSD"] *= 1 + cost_pct_delta
-                df.loc[mask, "SimulationUSD"] += cost_abs_delta
+                fte_mask = target_mask & detail["IsFTE"]
 
-    df["SimulationFTE"] = df["SimulationFTE"].clip(lower=0)
-    df["SimulationUSD"] = df["SimulationUSD"].clip(lower=0)
+                affected_months = detail.loc[fte_mask, "Month"].nunique()
+                if affected_months == 0:
+                    continue
 
-    return df
+                existing_fte_rows_per_month = (
+                    detail.loc[fte_mask].groupby("Month").size().to_dict()
+                )
 
+                for month, row_count in existing_fte_rows_per_month.items():
+                    month_mask = fte_mask & (detail["Month"] == month)
+                    detail.loc[month_mask, "SimulationValue"] += fte_delta / row_count
 
-def build_simulation_detail(
-    source_df: pd.DataFrame,
-    simulation_monthly_df: pd.DataFrame,
-) -> pd.DataFrame:
-    detail = source_to_long_baseline(source_df)
-    detail["IsFTE"] = identify_fte_rows(detail)
+                cost_mask = target_mask & ~detail["IsFTE"]
+                affected_cost = detail.loc[cost_mask, "BaselineValue"].sum()
+                affected_fte = detail.loc[fte_mask, "BaselineValue"].sum()
 
-    monthly = simulation_monthly_df.copy()
-    monthly["MonthKey"] = monthly["Month"].dt.strftime("%Y%m")
+                if affected_fte != 0:
+                    cost_per_fte = affected_cost / affected_fte
+                    cost_delta_total = fte_delta * cost_per_fte
 
-    monthly["FTERatio"] = monthly.apply(
-        lambda r: r["SimulationFTE"] / r["BaselineFTE"]
-        if r["BaselineFTE"] != 0
-        else 1,
-        axis=1,
-    )
+                    cost_rows_per_month = (
+                        detail.loc[cost_mask].groupby("Month").size().to_dict()
+                    )
 
-    monthly["CostRatio"] = monthly.apply(
-        lambda r: r["SimulationUSD"] / r["BaselineUSD"]
-        if r["BaselineUSD"] != 0
-        else 1,
-        axis=1,
-    )
+                    for month, row_count in cost_rows_per_month.items():
+                        month_mask = cost_mask & (detail["Month"] == month)
+                        detail.loc[month_mask, "SimulationValue"] += cost_delta_total / row_count
 
-    ratios = monthly[["MonthKey", "FTERatio", "CostRatio"]]
+            elif action_type == "cost_change":
+                cost_mask = target_mask & ~detail["IsFTE"]
+                detail.loc[cost_mask, "SimulationValue"] *= 1 + cost_pct_delta
+                detail.loc[cost_mask, "SimulationValue"] += cost_abs_delta
 
-    detail = detail.merge(
-        ratios,
-        left_on="Month",
-        right_on="MonthKey",
-        how="left",
-    )
-
-    detail["SimulationValue"] = detail.apply(
-        lambda r: r["BaselineValue"] * r["FTERatio"]
-        if r["IsFTE"]
-        else r["BaselineValue"] * r["CostRatio"],
-        axis=1,
-    )
-
+    detail["SimulationValue"] = detail["SimulationValue"].clip(lower=0)
     detail["Delta"] = detail["SimulationValue"] - detail["BaselineValue"]
 
+    return detail
+
+
+def aggregate_monthly_from_detail(detail_df: pd.DataFrame) -> pd.DataFrame:
+    fte_df = (
+        detail_df[detail_df["IsFTE"]]
+        .groupby("Month", as_index=False)
+        .agg(
+            BaselineFTE=("BaselineValue", "sum"),
+            SimulationFTE=("SimulationValue", "sum"),
+        )
+    )
+
+    cost_df = (
+        detail_df[~detail_df["IsFTE"]]
+        .groupby("Month", as_index=False)
+        .agg(
+            BaselineUSD=("BaselineValue", "sum"),
+            SimulationUSD=("SimulationValue", "sum"),
+        )
+    )
+
+    monthly = pd.merge(fte_df, cost_df, on="Month", how="outer").fillna(0)
+    monthly["MonthDate"] = pd.to_datetime(monthly["Month"], format="%Y%m")
+    monthly = monthly.sort_values("MonthDate")
+    monthly["MonthLabel"] = monthly["MonthDate"].dt.strftime("%b %Y")
+
+    return monthly
+
+
+def build_simulation_detail(detail_df: pd.DataFrame) -> pd.DataFrame:
     ordered_cols = DATA_SAMPLE_ROW_COLUMNS + [
         "Month",
         "BaselineValue",
@@ -544,9 +566,8 @@ def build_simulation_detail(
         "Delta",
     ]
 
-    result = detail[ordered_cols].copy()
+    result = detail_df[ordered_cols].copy()
     result["Month"] = result["Month"].astype(str)
-
     return result.sort_values(DATA_SAMPLE_ROW_COLUMNS + ["Month"])
 
 
@@ -913,13 +934,6 @@ def main():
         st.caption(f"Drivers: {st.session_state.drivers_source}")
         st.caption(f"Rules: {st.session_state.rules_source}")
 
-    try:
-        baseline_monthly = source_to_monthly_baseline(st.session_state.data_sample_df)
-    except Exception as exc:
-        with right:
-            st.error(f"Data preparation error: {exc}")
-        return
-
     with left:
         st.divider()
 
@@ -928,7 +942,7 @@ def main():
         st.markdown('<div class="box">', unsafe_allow_html=True)
         simulation_prompt = st.text_area(
             "Simulation input",
-            placeholder="Example: Hire 10 FTE effective January 2027",
+            placeholder="Example: Increase FTE by 10 for Cost Center CC_001 from January 2027",
             height=110,
             key=input_key,
         )
@@ -973,15 +987,17 @@ def main():
                 unsafe_allow_html=True,
             )
 
-    simulation_df = apply_simulation_logic(
-        baseline_monthly,
-        st.session_state.simulation_events,
-    )
-
-    simulation_detail_df = build_simulation_detail(
-        st.session_state.data_sample_df,
-        simulation_df,
-    )
+    try:
+        detail_df = apply_detail_simulation_logic(
+            st.session_state.data_sample_df,
+            st.session_state.simulation_events,
+        )
+        simulation_df = aggregate_monthly_from_detail(detail_df)
+        simulation_detail_df = build_simulation_detail(detail_df)
+    except Exception as exc:
+        with right:
+            st.error(f"Data preparation error: {exc}")
+        return
 
     baseline_avg_fte = simulation_df["BaselineFTE"].mean()
     simulation_avg_fte = simulation_df["SimulationFTE"].mean()
