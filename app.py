@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 st.set_page_config(
@@ -169,13 +170,11 @@ def get_actual_column(df: pd.DataFrame, expected_name: str) -> Optional[str]:
 
 def get_month_columns(df: pd.DataFrame, excluded: List[str]) -> List[str]:
     excluded_lower = [x.lower() for x in excluded]
-
     month_cols = [
         col
         for col in df.columns
         if str(col).strip().lower() not in excluded_lower and is_yyyymm_column(col)
     ]
-
     return sorted(month_cols, key=lambda x: pd.to_datetime(str(x), format="%Y%m"))
 
 
@@ -610,6 +609,89 @@ def render_datapoints_row(
     cost_arrow = "↑" if cost_delta >= 0 else "↓"
 
     html_block = f"""
+    <style>
+        .dp-grid {{
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 18px;
+            width: 100%;
+        }}
+
+        .dp-card {{
+            background: #111827;
+            border: 1px solid #1F2937;
+            border-radius: 10px;
+            height: 126px;
+            padding: 18px 22px;
+            box-sizing: border-box;
+            overflow: hidden;
+            font-family: sans-serif;
+        }}
+
+        .dp-title {{
+            color: #F9FAFB;
+            font-size: 14px;
+            font-weight: 700;
+            margin-bottom: 14px;
+            white-space: nowrap;
+        }}
+
+        .dp-main-area {{
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 18px;
+            width: 100%;
+        }}
+
+        .dp-main-stack {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            width: fit-content;
+            max-width: 78%;
+        }}
+
+        .dp-main {{
+            color: #F9FAFB;
+            font-size: 34px;
+            line-height: 38px;
+            font-weight: 800;
+            white-space: nowrap;
+            text-align: center;
+        }}
+
+        .dp-secondary {{
+            color: #CBD5E1;
+            font-size: 10px;
+            line-height: 12px;
+            margin-top: 8px;
+            text-align: center;
+            white-space: nowrap;
+        }}
+
+        .dp-delta {{
+            align-self: center;
+            font-size: 14px;
+            line-height: 18px;
+            font-weight: 800;
+            white-space: nowrap;
+            padding: 5px 10px;
+            border-radius: 999px;
+        }}
+
+        .dp-delta.positive {{
+            color: #22C55E;
+            background: rgba(34, 197, 94, 0.15);
+        }}
+
+        .dp-delta.negative {{
+            color: #EF4444;
+            background: rgba(239, 68, 68, 0.15);
+        }}
+    </style>
+
     <div class="dp-grid">
         <div class="dp-card">
             <div class="dp-title">Baseline FTE</div>
@@ -652,7 +734,8 @@ def render_datapoints_row(
         </div>
     </div>
     """
-    st.markdown(html_block, unsafe_allow_html=True)
+
+    components.html(html_block, height=132, scrolling=False)
 
 
 def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
@@ -724,86 +807,6 @@ def apply_css():
         height: 42px;
         border-radius: 50%;
         border: 2px dashed #94A3B8;
-    }
-
-    .dp-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 18px;
-        margin-bottom: 5px;
-    }
-
-    .dp-card {
-        background: #111827;
-        border: 1px solid #1F2937;
-        border-radius: 10px;
-        height: 126px;
-        padding: 18px 22px;
-        box-sizing: border-box;
-        overflow: hidden;
-    }
-
-    .dp-title {
-        color: #F9FAFB;
-        font-size: 14px;
-        font-weight: 700;
-        margin-bottom: 14px;
-        white-space: nowrap;
-    }
-
-    .dp-main-area {
-        display: flex;
-        align-items: center;
-        justify-content: flex-start;
-        gap: 18px;
-        width: 100%;
-    }
-
-    .dp-main-stack {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: flex-start;
-        width: fit-content;
-        max-width: 78%;
-    }
-
-    .dp-main {
-        color: #F9FAFB;
-        font-size: 34px;
-        line-height: 38px;
-        font-weight: 800;
-        white-space: nowrap;
-        text-align: center;
-    }
-
-    .dp-secondary {
-        color: #CBD5E1;
-        font-size: 10px;
-        line-height: 12px;
-        margin-top: 8px;
-        text-align: center;
-        white-space: nowrap;
-    }
-
-    .dp-delta {
-        align-self: center;
-        font-size: 14px;
-        line-height: 18px;
-        font-weight: 800;
-        white-space: nowrap;
-        padding: 5px 10px;
-        border-radius: 999px;
-    }
-
-    .dp-delta.positive {
-        color: #22C55E;
-        background: rgba(34, 197, 94, 0.15);
-    }
-
-    .dp-delta.negative {
-        color: #EF4444;
-        background: rgba(239, 68, 68, 0.15);
     }
 
     .box {
