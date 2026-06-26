@@ -255,6 +255,9 @@ def source_to_long_baseline(source_df: pd.DataFrame) -> pd.DataFrame:
     long_df["BaselineValue"] = pd.to_numeric(
         long_df["BaselineValue"], errors="coerce"
     ).fillna(0)
+
+    # Reset behavior: every app run starts SimulationValue as BaselineValue.
+    # Simulation events are then applied on top.
     long_df["SimulationValue"] = long_df["BaselineValue"]
     long_df["IsFTE"] = identify_fte_rows(long_df)
 
@@ -311,19 +314,12 @@ def extract_scope(text: str) -> Dict[str, Optional[str]]:
         ("Account", r"account\s+([A-Za-z0-9_\-]+)"),
     ]
 
-    lower = text.lower()
     for dimension, pattern in patterns:
-        match = re.search(pattern, lower, re.IGNORECASE)
+        match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            return {
-                "scope_dimension": dimension,
-                "scope_value": match.group(1),
-            }
+            return {"scope_dimension": dimension, "scope_value": match.group(1)}
 
-    return {
-        "scope_dimension": None,
-        "scope_value": None,
-    }
+    return {"scope_dimension": None, "scope_value": None}
 
 
 def fallback_parse_instruction(text: str) -> Dict[str, Any]:
@@ -492,15 +488,9 @@ def apply_detail_simulation_logic(
             if action_type in ["hire", "layoff"]:
                 fte_mask = target_mask & detail["IsFTE"]
 
-                affected_months = detail.loc[fte_mask, "Month"].nunique()
-                if affected_months == 0:
-                    continue
+                rows_per_month = detail.loc[fte_mask].groupby("Month").size().to_dict()
 
-                existing_fte_rows_per_month = (
-                    detail.loc[fte_mask].groupby("Month").size().to_dict()
-                )
-
-                for month, row_count in existing_fte_rows_per_month.items():
+                for month, row_count in rows_per_month.items():
                     month_mask = fte_mask & (detail["Month"] == month)
                     detail.loc[month_mask, "SimulationValue"] += fte_delta / row_count
 
@@ -511,10 +501,7 @@ def apply_detail_simulation_logic(
                 if affected_fte != 0:
                     cost_per_fte = affected_cost / affected_fte
                     cost_delta_total = fte_delta * cost_per_fte
-
-                    cost_rows_per_month = (
-                        detail.loc[cost_mask].groupby("Month").size().to_dict()
-                    )
+                    cost_rows_per_month = detail.loc[cost_mask].groupby("Month").size().to_dict()
 
                     for month, row_count in cost_rows_per_month.items():
                         month_mask = cost_mask & (detail["Month"] == month)
@@ -574,19 +561,8 @@ def build_simulation_detail(detail_df: pd.DataFrame) -> pd.DataFrame:
 def render_chart(title, df, baseline_metric, simulation_metric, y_title, height):
     fig = go.Figure()
 
-    fig.add_trace(go.Bar(
-        x=df["MonthLabel"],
-        y=df[baseline_metric],
-        name="Baseline",
-        marker_color="#2563EB",
-    ))
-
-    fig.add_trace(go.Bar(
-        x=df["MonthLabel"],
-        y=df[simulation_metric],
-        name="Simulation",
-        marker_color="#F97316",
-    ))
+    fig.add_trace(go.Bar(x=df["MonthLabel"], y=df[baseline_metric], name="Baseline", marker_color="#2563EB"))
+    fig.add_trace(go.Bar(x=df["MonthLabel"], y=df[simulation_metric], name="Simulation", marker_color="#F97316"))
 
     fig.update_layout(
         title=title,
@@ -596,13 +572,7 @@ def render_chart(title, df, baseline_metric, simulation_metric, y_title, height)
         paper_bgcolor="#111827",
         font=dict(color="#F9FAFB"),
         margin=dict(l=30, r=30, t=62, b=90),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         yaxis_title=y_title,
     )
 
@@ -637,7 +607,6 @@ def render_datapoints_row(
             gap: 18px;
             width: 100%;
         }}
-
         .dp-card {{
             background: #111827;
             border: 1px solid #1F2937;
@@ -648,7 +617,6 @@ def render_datapoints_row(
             overflow: hidden;
             font-family: sans-serif;
         }}
-
         .dp-title {{
             color: #F9FAFB;
             font-size: 14px;
@@ -656,7 +624,6 @@ def render_datapoints_row(
             margin-bottom: 14px;
             white-space: nowrap;
         }}
-
         .dp-main-area {{
             display: flex;
             align-items: center;
@@ -664,7 +631,6 @@ def render_datapoints_row(
             gap: 18px;
             width: 100%;
         }}
-
         .dp-main-stack {{
             display: flex;
             flex-direction: column;
@@ -673,7 +639,6 @@ def render_datapoints_row(
             width: fit-content;
             max-width: 78%;
         }}
-
         .dp-main {{
             color: #F9FAFB;
             font-size: 34px;
@@ -682,7 +647,6 @@ def render_datapoints_row(
             white-space: nowrap;
             text-align: center;
         }}
-
         .dp-secondary {{
             color: #CBD5E1;
             font-size: 10px;
@@ -691,7 +655,6 @@ def render_datapoints_row(
             text-align: center;
             white-space: nowrap;
         }}
-
         .dp-delta {{
             align-self: center;
             font-size: 14px;
@@ -701,12 +664,10 @@ def render_datapoints_row(
             padding: 5px 10px;
             border-radius: 999px;
         }}
-
         .dp-delta.positive {{
             color: #22C55E;
             background: rgba(34, 197, 94, 0.15);
         }}
-
         .dp-delta.negative {{
             color: #EF4444;
             background: rgba(239, 68, 68, 0.15);
@@ -772,95 +733,93 @@ def build_summary(df: pd.DataFrame, events: List[Dict[str, Any]]) -> List[str]:
 
 
 def apply_css():
-    st.markdown("""
-    <style>
-    .stApp {
-        background-color: #0B0F17;
-        color: #F9FAFB;
-    }
-
-    .block-container {
-        padding-top: 1rem;
-        padding-left: 2rem;
-        padding-right: 2rem;
-        max-width: 100%;
-    }
-
-    .main-header {
-        background: linear-gradient(90deg, #0F172A, #1E293B);
-        color: white;
-        padding: 16px 24px;
-        border-radius: 14px;
-        margin-bottom: 20px;
-        display: grid;
-        grid-template-columns: 1fr 2fr 1fr;
-        align-items: center;
-    }
-
-    .logo {
-        width: 58px;
-        height: 38px;
-        border-radius: 8px;
-        background: white;
-        color: #0F766E;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 900;
-    }
-
-    .title {
-        text-align: center;
-        font-size: 26px;
-        font-weight: 800;
-    }
-
-    .user {
-        display: flex;
-        justify-content: flex-end;
-        gap: 12px;
-        align-items: center;
-        font-weight: 700;
-    }
-
-    .avatar {
-        width: 42px;
-        height: 42px;
-        border-radius: 50%;
-        border: 2px dashed #94A3B8;
-    }
-
-    .box {
-        background: #111827;
-        border: 1px solid #334155;
-        border-radius: 12px;
-        padding: 14px;
-        margin-bottom: 12px;
-    }
-
-    .summary {
-        background: #111827;
-        border: 1px solid #334155;
-        border-left: 6px solid #F97316;
-        border-radius: 12px;
-        padding: 18px 24px;
-        margin-top: 18px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background-color: #0B0F17;
+            color: #F9FAFB;
+        }
+        .block-container {
+            padding-top: 1rem;
+            padding-left: 2rem;
+            padding-right: 2rem;
+            max-width: 100%;
+        }
+        .main-header {
+            background: linear-gradient(90deg, #0F172A, #1E293B);
+            color: white;
+            padding: 16px 24px;
+            border-radius: 14px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: 1fr 2fr 1fr;
+            align-items: center;
+        }
+        .logo {
+            width: 58px;
+            height: 38px;
+            border-radius: 8px;
+            background: white;
+            color: #0F766E;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 900;
+        }
+        .title {
+            text-align: center;
+            font-size: 26px;
+            font-weight: 800;
+        }
+        .user {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            align-items: center;
+            font-weight: 700;
+        }
+        .avatar {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            border: 2px dashed #94A3B8;
+        }
+        .box {
+            background: #111827;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+        .summary {
+            background: #111827;
+            border: 1px solid #334155;
+            border-left: 6px solid #F97316;
+            border-radius: 12px;
+            padding: 18px 24px;
+            margin-top: 18px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_header():
-    st.markdown(f"""
-    <div class="main-header">
-        <div class="logo">TEVA</div>
-        <div class="title">{REPORT_TITLE}</div>
-        <div class="user">
-            <div>TEST USER</div>
-            <div class="avatar"></div>
+    st.markdown(
+        f"""
+        <div class="main-header">
+            <div class="logo">TEVA</div>
+            <div class="title">{REPORT_TITLE}</div>
+            <div class="user">
+                <div>TEST USER</div>
+                <div class="avatar"></div>
+            </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def initialize_state():
@@ -934,7 +893,6 @@ def main():
         st.caption(f"Drivers: {st.session_state.drivers_source}")
         st.caption(f"Rules: {st.session_state.rules_source}")
 
-    with left:
         st.divider()
 
         input_key = f"simulation_input_text_{st.session_state.simulation_input_counter}"
@@ -967,10 +925,10 @@ def main():
             st.rerun()
 
         if st.button("Reset simulation only", use_container_width=True):
-    st.session_state.simulation_events = []
-    st.session_state.simulation_requests = []
-    st.session_state.simulation_input_counter += 1
-    st.rerun()
+            st.session_state.simulation_events = []
+            st.session_state.simulation_requests = []
+            st.session_state.simulation_input_counter += 1
+            st.rerun()
 
         st.subheader("Executed simulations")
 
